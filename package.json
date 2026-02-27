@@ -1,0 +1,29 @@
+{
+  "name": "imagia",
+  "version": "1.0.0",
+  "description": "Imagia - AI-powered app builder with marketing generation",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:worker:build\" \"npm run dev:frontend\"",
+    "dev:backend": "cd packages/backend && npm run dev",
+    "dev:worker:build": "cd packages/backend && npm run worker:build",
+    "dev:worker:marketing": "cd packages/backend && npm run worker:marketing",
+    "dev:worker:deploy": "cd packages/backend && npm run worker:deploy",
+    "dev:worker:social": "cd packages/backend && npm run worker:social",
+    "dev:frontend": "cd packages/frontend && npm run dev",
+    "install:all": "npm install",
+    "db:migrate": "cd packages/backend && npx knex migrate:latest --knexfile src/db/knexfile.js",
+    "db:rollback": "cd packages/backend && npx knex migrate:rollback --knexfile src/db/knexfile.js",
+    "db:seed": "cd packages/backend && npx knex seed:run --knexfile src/db/knexfile.js",
+    "lint": "concurrently \"cd packages/backend && npm run lint\" \"cd packages/frontend && npm run lint\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

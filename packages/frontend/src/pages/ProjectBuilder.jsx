@@ -1,0 +1,1474 @@
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useParams, Link } from 'react-router-dom';
+import useProgress from '../hooks/useProgress';
+import useChat from '../hooks/useChat';
+import {
+  getProject,
+  getProjectFiles,
+  getProjectSecrets,
+  addSecret,
+  deleteSecret,
+  deployProject,
+  getDeploymentStatus,
+  githubPush,
+  githubPull,
+  githubSyncStatus,
+  githubCreateRepo,
+  githubConnect,
+} from '../services/api';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const SECRET_TYPES = ['api_key', 'oauth_token', 'database_url', 'env_variable', 'other'];
+
+const LANG_COLORS = {
+  javascript: 'bg-yellow-400 text-yellow-900',
+  jsx: 'bg-sky-400 text-sky-900',
+  typescript: 'bg-blue-500 text-white',
+  tsx: 'bg-blue-400 text-white',
+  python: 'bg-green-500 text-white',
+  html: 'bg-orange-500 text-white',
+  css: 'bg-purple-500 text-white',
+  json: 'bg-gray-500 text-white',
+  markdown: 'bg-gray-400 text-white',
+  sql: 'bg-red-400 text-white',
+  yaml: 'bg-pink-400 text-white',
+  shell: 'bg-gray-600 text-white',
+  dockerfile: 'bg-blue-600 text-white',
+};
+
+const FILE_ICONS = {
+  javascript: '{}',
+  jsx: '</>',
+  typescript: 'TS',
+  tsx: 'TX',
+  python: 'Py',
+  html: '<>',
+  css: '#',
+  json: '{}',
+  sql: 'DB',
+  yaml: 'YA',
+  shell: '$',
+  dockerfile: 'D',
+};
+
+// ---------------------------------------------------------------------------
+// Utility helpers
+// ---------------------------------------------------------------------------
+
+/** Format an ISO date string to a readable short time. */
+function fmtTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+/** Detect the language from a file path. */
+function detectLanguage(filePath) {
+  if (!filePath) return null;
+  const ext = filePath.split('.').pop().toLowerCase();
+  const map = {
+    js: 'javascript',
+    jsx: 'jsx',
+    ts: 'typescript',
+    tsx: 'tsx',
+    py: 'python',
+    html: 'html',
+    css: 'css',
+    json: 'json',
+    md: 'markdown',
+    sql: 'sql',
+    yml: 'yaml',
+    yaml: 'yaml',
+    sh: 'shell',
+    bash: 'shell',
+    Dockerfile: 'dockerfile',
+  };
+  if (filePath.endsWith('Dockerfile')) return 'dockerfile';
+  return map[ext] || null;
+}
+
+/** Parse message content and split into text and code blocks. */
+function parseContent(content) {
+  if (!content) return [{ type: 'text', value: '' }];
+  const parts = [];
+  const regex = /```(\w+)?\n([\s\S]*?)```/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = regex.exec(content)) !== null) {
+    // Text before code block
+    if (match.index > lastIndex) {
+      const text = content.slice(lastIndex, match.index);
+      if (text.trim()) parts.push({ type: 'text', value: text });
+    }
+    parts.push({ type: 'code', lang: match[1] || 'text', value: match[2] });
+    lastIndex = match.index + match[0].length;
+  }
+
+  // Remaining text
+  const tail = content.slice(lastIndex);
+  if (tail.trim()) parts.push({ type: 'text', value: tail });
+
+  if (parts.length === 0) parts.push({ type: 'text', value: content });
+  return parts;
+}
+
+/** Build a tree structure from a flat list of file paths. */
+function buildFileTree(files) {
+  const root = { name: '/', children: {}, files: [] };
+
+  for (const file of files) {
+    const path = file.file_path || file.path || '';
+    const segments = path.split('/').filter(Boolean);
+    let current = root;
+
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      if (i === segments.length - 1) {
+        // It is a file
+        current.files.push({ ...file, displayName: seg });
+      } else {
+        // It is a folder
+        if (!current.children[seg]) {
+          current.children[seg] = { name: seg, children: {}, files: [] };
+        }
+        current = current.children[seg];
+      }
+    }
+  }
+
+  return root;
+}
+
+// ============================================================================
+// Main Component
+// ============================================================================
+
+export default function ProjectBuilder() {
+  const { id: projectId } = useParams();
+  const { progress, stage, isConnected } = useProgress(projectId);
+  const {
+    messages,
+    isLoading: chatLoading,
+    isSending,
+    isUploading,
+    detectedSecrets,
+    pendingAttachments,
+    sendMessage,
+    saveSecretsAndRetry,
+    refreshMessages,
+    dismissSecrets,
+    addAttachments,
+    removeAttachment,
+    conversationId,
+  } = useChat(projectId);
+
+  const fileInputRef = useRef(null);
+
+  // -- Project state ---
+  const [project, setProject] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  // -- Chat input ---
+  const [prompt, setPrompt] = useState('');
+  const [secretValues, setSecretValues] = useState({});
+  const messagesEndRef = useRef(null);
+
+  // -- Build state tracking ---
+  const [isBuilding, setIsBuilding] = useState(false);
+  const [buildSuccess, setBuildSuccess] = useState(false);
+  const [buildError, setBuildError] = useState(false);
+  const progressMessageRef = useRef('');
+
+  // -- Right panel ---
+  const [activeTab, setActiveTab] = useState('preview');
+  const [files, setFiles] = useState([]);
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [secrets, setSecrets] = useState([]);
+  const [newSecret, setNewSecret] = useState({ key: '', value: '', type: 'api_key' });
+  const [collapsedFolders, setCollapsedFolders] = useState(new Set());
+
+  // -- Deploy + GitHub state ---
+  const [isDeploying, setIsDeploying] = useState(false);
+  const [deployStatus, setDeployStatus] = useState(null);
+  const [githubStatus, setGithubStatus] = useState(null);
+  const [showGitHubModal, setShowGitHubModal] = useState(false);
+  const [gitRepoName, setGitRepoName] = useState('');
+  const [gitIsPrivate, setGitIsPrivate] = useState(false);
+
+  // ---- Load project on mount ------------------------------------------------
+  useEffect(() => {
+    if (!projectId) return;
+    let cancelled = false;
+
+    async function load() {
+      try {
+        setLoading(true);
+        const proj = await getProject(projectId);
+        if (!cancelled) setProject(proj);
+
+        const [fileData, secretData] = await Promise.all([
+          getProjectFiles(projectId).catch(() => []),
+          getProjectSecrets(projectId).catch(() => []),
+        ]);
+
+        if (!cancelled) {
+          setFiles(Array.isArray(fileData) ? fileData : fileData.files || []);
+          setSecrets(Array.isArray(secretData) ? secretData : secretData.secrets || []);
+        }
+      } catch (err) {
+        console.error('Failed to load project:', err);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    load();
+    return () => { cancelled = true; };
+  }, [projectId]);
+
+  // ---- Track build progress -------------------------------------------------
+  useEffect(() => {
+    if (progress > 0 && progress < 100) {
+      setIsBuilding(true);
+      setBuildSuccess(false);
+      setBuildError(false);
+    } else if (progress >= 100) {
+      setIsBuilding(false);
+      setBuildSuccess(true);
+      setBuildError(false);
+      // Refresh files & messages when build completes
+      getProjectFiles(projectId)
+        .then((data) => setFiles(Array.isArray(data) ? data : data.files || []))
+        .catch(() => {});
+      refreshMessages();
+      // Clear success after 5s
+      const timer = setTimeout(() => setBuildSuccess(false), 5000);
+      return () => clearTimeout(timer);
+    } else if (progress === -1) {
+      setIsBuilding(false);
+      setBuildSuccess(false);
+      setBuildError(true);
+      refreshMessages();
+      const timer = setTimeout(() => setBuildError(false), 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [progress, projectId, refreshMessages]);
+
+  // ---- Keep track of progress message text ---
+  useEffect(() => {
+    if (stage) progressMessageRef.current = stage;
+  }, [stage]);
+
+  // ---- Auto-scroll messages --------------------------------------------------
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, detectedSecrets, isSending]);
+
+  // ---- Initialize secret values when detected --------------------------------
+  useEffect(() => {
+    if (detectedSecrets && detectedSecrets.length > 0) {
+      const initial = {};
+      detectedSecrets.forEach((s) => {
+        initial[s.key] = { value: '', type: s.type || 'api_key' };
+      });
+      setSecretValues(initial);
+    }
+  }, [detectedSecrets]);
+
+  // ---- Handlers --------------------------------------------------------------
+
+  async function handleSend(e) {
+    e?.preventDefault();
+    if (!prompt.trim() || isSending || isBuilding) return;
+    const content = prompt;
+    setPrompt('');
+    await sendMessage(content);
+  }
+
+  function handleKeyDown(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  }
+
+  function handleFileSelect(e) {
+    if (e.target.files && e.target.files.length > 0) {
+      addAttachments(e.target.files);
+      e.target.value = '';
+    }
+  }
+
+  async function handleSubmitSecrets() {
+    if (!detectedSecrets) return;
+    const entries = detectedSecrets.map((s) => ({
+      key: s.key,
+      value: secretValues[s.key]?.value || '',
+      type: secretValues[s.key]?.type || s.type || 'api_key',
+    }));
+    await saveSecretsAndRetry(entries);
+    // Refresh the secrets list in the right panel
+    const data = await getProjectSecrets(projectId).catch(() => []);
+    setSecrets(Array.isArray(data) ? data : data.secrets || []);
+  }
+
+  async function handleAddSecret(e) {
+    e.preventDefault();
+    if (!newSecret.key.trim() || !newSecret.value.trim()) return;
+    try {
+      await addSecret(projectId, newSecret);
+      const data = await getProjectSecrets(projectId);
+      setSecrets(Array.isArray(data) ? data : data.secrets || []);
+      setNewSecret({ key: '', value: '', type: 'api_key' });
+    } catch (err) {
+      console.error('Failed to add secret:', err);
+    }
+  }
+
+  async function handleDeleteSecret(secretId) {
+    try {
+      await deleteSecret(projectId, secretId);
+      setSecrets((prev) => prev.filter((s) => s.id !== secretId));
+    } catch (err) {
+      console.error('Failed to delete secret:', err);
+    }
+  }
+
+  // -- Deploy handler --
+  async function handleDeploy() {
+    if (isDeploying) return;
+    try {
+      setIsDeploying(true);
+      await deployProject(projectId);
+      // The deploy progress will come through SSE
+    } catch (err) {
+      console.error('Deploy failed:', err);
+      setIsDeploying(false);
+    }
+  }
+
+  // -- GitHub handlers --
+  async function handleGitHubPush() {
+    try {
+      const result = await githubPush(projectId, 'Update from Imagia');
+      alert(`Code pushed! Commit: ${result.commit_sha?.slice(0, 7)}`);
+      refreshGitHubStatus();
+    } catch (err) {
+      alert(err.response?.data?.error || 'Push failed');
+    }
+  }
+
+  async function handleGitHubPull() {
+    try {
+      const result = await githubPull(projectId);
+      alert(`Pulled ${result.file_count} files from GitHub`);
+      // Refresh files
+      const fileData = await getProjectFiles(projectId).catch(() => []);
+      setFiles(Array.isArray(fileData) ? fileData : fileData.files || []);
+    } catch (err) {
+      alert(err.response?.data?.error || 'Pull failed');
+    }
+  }
+
+  async function handleCreateRepo(e) {
+    e.preventDefault();
+    if (!gitRepoName.trim()) return;
+    try {
+      const result = await githubCreateRepo(projectId, {
+        repo_name: gitRepoName,
+        is_private: gitIsPrivate,
+      });
+      setShowGitHubModal(false);
+      setGitRepoName('');
+      setProject((prev) => ({ ...prev, github_repo_url: result.repo?.html_url }));
+      refreshGitHubStatus();
+    } catch (err) {
+      alert(err.response?.data?.error || 'Failed to create repo');
+    }
+  }
+
+  async function handleConnectGitHub() {
+    try {
+      const result = await githubConnect();
+      window.open(result.auth_url, '_blank', 'width=600,height=700');
+    } catch (err) {
+      console.error('GitHub connect failed:', err);
+    }
+  }
+
+  async function refreshGitHubStatus() {
+    try {
+      const status = await githubSyncStatus(projectId);
+      setGithubStatus(status);
+    } catch {
+      setGithubStatus(null);
+    }
+  }
+
+  // Load deploy + GitHub status on mount
+  useEffect(() => {
+    if (!projectId) return;
+    getDeploymentStatus(projectId).then(setDeployStatus).catch(() => {});
+    githubSyncStatus(projectId).then(setGithubStatus).catch(() => {});
+  }, [projectId]);
+
+  // Clear deploying state when progress completes
+  useEffect(() => {
+    if (progress >= 100 || progress === -1) {
+      setIsDeploying(false);
+      getDeploymentStatus(projectId).then(setDeployStatus).catch(() => {});
+    }
+  }, [progress, projectId]);
+
+  const toggleFolder = useCallback((path) => {
+    setCollapsedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+
+  const hasMessages = messages.length > 0;
+  const placeholder = hasMessages
+    ? 'Tell me what to change...'
+    : 'Describe what you want to build...';
+
+  // ---- Loading state ---------------------------------------------------------
+  if (loading || chatLoading) {
+    return (
+      <div className="flex h-full items-center justify-center bg-gray-50">
+        <div className="flex flex-col items-center gap-3">
+          <div className="h-10 w-10 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent" />
+          <p className="text-sm text-gray-500">Loading project...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ==========================================================================
+  // Render
+  // ==========================================================================
+  return (
+    <div className="flex h-[calc(100vh-4rem)] gap-0 bg-gray-50">
+      {/* ================================================================== */}
+      {/* LEFT PANEL -- Chat (60%) */}
+      {/* ================================================================== */}
+      <div className="flex w-[60%] flex-col border-r border-gray-200 bg-white">
+        {/* -- Header -- */}
+        <div className="flex items-center justify-between border-b border-gray-200 px-6 py-3.5">
+          <div className="min-w-0">
+            <h2 className="truncate text-base font-semibold text-gray-900">
+              {project?.name || 'Project'}
+            </h2>
+            <p className="text-xs text-gray-400">
+              {project?.app_type ? project.app_type : 'Chat with AI to build your app'}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {isConnected && (
+              <span className="flex items-center gap-1.5 rounded-full bg-green-50 px-2.5 py-1 text-xs font-medium text-green-600">
+                <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
+                Live
+              </span>
+            )}
+
+            {/* GitHub button */}
+            {project?.github_repo_url ? (
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={handleGitHubPush}
+                  className="rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50"
+                  title="Push to GitHub"
+                >
+                  Push
+                </button>
+                <button
+                  onClick={handleGitHubPull}
+                  className="rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50"
+                  title="Pull from GitHub"
+                >
+                  Pull
+                </button>
+                {githubStatus?.status && githubStatus.status !== 'not_connected' && (
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                    githubStatus.status === 'synced'
+                      ? 'bg-green-50 text-green-600'
+                      : githubStatus.status === 'diverged'
+                        ? 'bg-yellow-50 text-yellow-600'
+                        : 'bg-gray-100 text-gray-500'
+                  }`}>
+                    {githubStatus.status}
+                  </span>
+                )}
+              </div>
+            ) : (
+              <button
+                onClick={() => setShowGitHubModal(true)}
+                className="flex items-center gap-1.5 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50"
+              >
+                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z" />
+                </svg>
+                GitHub
+              </button>
+            )}
+
+            {/* Marketing link */}
+            {project?.deployment_url && (
+              <Link
+                to={`/project/${projectId}/marketing`}
+                className="rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50"
+              >
+                Marketing
+              </Link>
+            )}
+
+            {/* Deploy button */}
+            <button
+              onClick={handleDeploy}
+              disabled={isDeploying || isBuilding || files.length === 0}
+              className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white shadow-sm transition-all hover:bg-emerald-700 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {isDeploying ? (
+                <>
+                  <svg className="h-3.5 w-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Deploying...
+                </>
+              ) : (
+                <>
+                  <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.5 10.5L12 3m0 0l7.5 7.5M12 3v18" />
+                  </svg>
+                  Deploy
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* -- Progress bar -- */}
+        <BuildProgressBar
+          isBuilding={isBuilding}
+          buildSuccess={buildSuccess}
+          buildError={buildError}
+          progress={progress}
+          stage={stage}
+          progressMessage={progressMessageRef.current}
+        />
+
+        {/* -- Messages -- */}
+        <div className="flex-1 overflow-y-auto px-6 py-5">
+          {/* Empty state */}
+          {messages.length === 0 && !detectedSecrets && (
+            <div className="flex h-full flex-col items-center justify-center">
+              <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-indigo-50">
+                <svg className="h-8 w-8 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5" />
+                </svg>
+              </div>
+              <h3 className="mb-2 text-lg font-semibold text-gray-800">What would you like to build?</h3>
+              <p className="max-w-sm text-center text-sm text-gray-400">
+                Describe your app idea and the AI will generate the code, configure the project, and prepare it for deployment.
+              </p>
+              <div className="mt-6 flex flex-wrap justify-center gap-2">
+                {['A task tracker app', 'A landing page with CTA', 'A REST API with auth'].map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => setPrompt(s)}
+                    className="rounded-full border border-gray-200 px-3.5 py-1.5 text-xs text-gray-500 transition-colors hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-600"
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Message bubbles */}
+          <div className="space-y-4">
+            {messages.map((msg, i) => (
+              <MessageBubble key={msg.id || i} message={msg} />
+            ))}
+
+            {/* Secrets detection card */}
+            {detectedSecrets && detectedSecrets.length > 0 && (
+              <SecretsDetectionCard
+                detectedSecrets={detectedSecrets}
+                secretValues={secretValues}
+                onSecretChange={setSecretValues}
+                onSubmit={handleSubmitSecrets}
+                onDismiss={dismissSecrets}
+                isSaving={isSending}
+              />
+            )}
+
+            {/* Typing indicator */}
+            {isSending && !detectedSecrets && (
+              <div className="flex justify-start">
+                <div className="flex items-center gap-1.5 rounded-2xl rounded-bl-md bg-gray-100 px-4 py-3">
+                  <span className="h-2 w-2 animate-bounce rounded-full bg-gray-400" style={{ animationDelay: '0ms' }} />
+                  <span className="h-2 w-2 animate-bounce rounded-full bg-gray-400" style={{ animationDelay: '150ms' }} />
+                  <span className="h-2 w-2 animate-bounce rounded-full bg-gray-400" style={{ animationDelay: '300ms' }} />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div ref={messagesEndRef} />
+        </div>
+
+        {/* -- Input area -- */}
+        <form
+          onSubmit={handleSend}
+          className="border-t border-gray-200 bg-white px-6 py-4"
+        >
+          {/* Pending attachment previews */}
+          {pendingAttachments.length > 0 && (
+            <div className="mb-3 flex flex-wrap gap-2">
+              {pendingAttachments.map((file, idx) => (
+                <AttachmentPreview key={`${file.name}-${idx}`} file={file} onRemove={() => removeAttachment(idx)} />
+              ))}
+            </div>
+          )}
+
+          <div className="flex items-end gap-3">
+            {/* Attach button */}
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isBuilding}
+              className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl border border-gray-200 bg-gray-50 text-gray-400 transition-all hover:border-gray-300 hover:bg-gray-100 hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-40"
+              title="Attach files (images, audio, video)"
+            >
+              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
+              </svg>
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept="image/*,audio/*,video/*"
+              onChange={handleFileSelect}
+              className="hidden"
+            />
+
+            <div className="relative flex-1">
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder={placeholder}
+                rows={1}
+                disabled={isBuilding}
+                className="w-full resize-none rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 pr-12 text-sm leading-relaxed text-gray-800 placeholder-gray-400 transition-colors focus:border-indigo-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
+                style={{ minHeight: '44px', maxHeight: '120px' }}
+                onInput={(e) => {
+                  e.target.style.height = 'auto';
+                  e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
+                }}
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={!prompt.trim() || isSending || isBuilding}
+              className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-sm transition-all hover:bg-indigo-700 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:shadow-sm"
+            >
+              {isUploading ? (
+                <svg className="h-5 w-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+              ) : (
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+                </svg>
+              )}
+            </button>
+          </div>
+          {isBuilding && (
+            <p className="mt-2 text-center text-xs text-gray-400">
+              Build in progress -- input disabled until it completes.
+            </p>
+          )}
+        </form>
+      </div>
+
+      {/* ================================================================== */}
+      {/* RIGHT PANEL (40%) */}
+      {/* ================================================================== */}
+      <div className="flex w-[40%] flex-col bg-white">
+        {/* -- Tab bar -- */}
+        <div className="flex border-b border-gray-200">
+          {[
+            { key: 'preview', label: 'Preview' },
+            { key: 'files', label: 'Files' },
+            { key: 'secrets', label: 'Secrets' },
+          ].map(({ key, label }) => (
+            <button
+              key={key}
+              onClick={() => setActiveTab(key)}
+              className={`relative flex-1 px-4 py-3 text-center text-sm font-medium transition-colors ${
+                activeTab === key
+                  ? 'text-indigo-600'
+                  : 'text-gray-400 hover:text-gray-600'
+              }`}
+            >
+              {label}
+              {key === 'files' && files.length > 0 && (
+                <span className="ml-1.5 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-gray-100 px-1.5 text-[10px] font-semibold text-gray-500">
+                  {files.length}
+                </span>
+              )}
+              {key === 'secrets' && secrets.length > 0 && (
+                <span className="ml-1.5 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-gray-100 px-1.5 text-[10px] font-semibold text-gray-500">
+                  {secrets.length}
+                </span>
+              )}
+              {activeTab === key && (
+                <span className="absolute inset-x-0 bottom-0 h-0.5 bg-indigo-600" />
+              )}
+            </button>
+          ))}
+        </div>
+
+        {/* -- Tab content -- */}
+        <div className="flex-1 overflow-hidden">
+          {activeTab === 'preview' && <PreviewTab project={project} />}
+          {activeTab === 'files' && (
+            <FilesTab
+              files={files}
+              selectedFile={selectedFile}
+              onSelectFile={setSelectedFile}
+              collapsedFolders={collapsedFolders}
+              onToggleFolder={toggleFolder}
+            />
+          )}
+          {activeTab === 'secrets' && (
+            <SecretsTab
+              secrets={secrets}
+              newSecret={newSecret}
+              onNewSecretChange={setNewSecret}
+              onAddSecret={handleAddSecret}
+              onDeleteSecret={handleDeleteSecret}
+            />
+          )}
+        </div>
+      </div>
+
+      {/* GitHub Modal */}
+      {showGitHubModal && (
+        <GitHubModal
+          onClose={() => setShowGitHubModal(false)}
+          onCreateRepo={handleCreateRepo}
+          onConnectGitHub={handleConnectGitHub}
+          repoName={gitRepoName}
+          onRepoNameChange={setGitRepoName}
+          isPrivate={gitIsPrivate}
+          onPrivateChange={setGitIsPrivate}
+          projectName={project?.name}
+        />
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Sub-components
+// ============================================================================
+
+// ---------- Build Progress Bar ------------------------------------------------
+
+function BuildProgressBar({ isBuilding, buildSuccess, buildError, progress, stage }) {
+  if (!isBuilding && !buildSuccess && !buildError) return null;
+
+  // Success state
+  if (buildSuccess) {
+    return (
+      <div className="border-b border-green-100 bg-green-50 px-6 py-3">
+        <div className="flex items-center gap-2">
+          <svg className="h-4 w-4 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className="text-sm font-medium text-green-700">Build completed successfully!</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Error state
+  if (buildError) {
+    return (
+      <div className="border-b border-red-100 bg-red-50 px-6 py-3">
+        <div className="flex items-center gap-2">
+          <svg className="h-4 w-4 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className="text-sm font-medium text-red-700">Build failed. Check messages for details.</span>
+        </div>
+      </div>
+    );
+  }
+
+  // In-progress state
+  const pct = Math.max(0, Math.min(100, progress));
+  return (
+    <div className="border-b border-indigo-100 bg-indigo-50/50 px-6 py-3">
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="text-xs font-medium text-indigo-700">{stage || 'Building...'}</span>
+        <span className="text-xs tabular-nums text-indigo-400">{Math.round(pct)}%</span>
+      </div>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-indigo-100">
+        <div
+          className="h-full rounded-full bg-indigo-500 transition-all duration-500 ease-out"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ---------- Message Bubble ----------------------------------------------------
+
+function MessageBubble({ message }) {
+  const isUser = message.role === 'user';
+  const isError = message.metadata?.error;
+  const parts = useMemo(() => parseContent(message.content), [message.content]);
+  const time = fmtTime(message.created_at);
+  const attachments = message.attachments || [];
+
+  return (
+    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+      <div className={`max-w-[85%] ${isUser ? 'items-end' : 'items-start'} flex flex-col`}>
+        {/* Attachment media */}
+        {attachments.length > 0 && (
+          <div className="mb-1.5 flex flex-wrap gap-2">
+            {attachments.map((att) => (
+              <MessageAttachment key={att.id} attachment={att} isUser={isUser} />
+            ))}
+          </div>
+        )}
+
+        <div
+          className={`rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+            isUser
+              ? 'rounded-br-md bg-indigo-600 text-white'
+              : isError
+                ? 'rounded-bl-md border border-red-200 bg-red-50 text-red-800'
+                : 'rounded-bl-md bg-gray-100 text-gray-800'
+          }`}
+        >
+          {parts.map((part, i) =>
+            part.type === 'code' ? (
+              <div key={i} className="my-2 first:mt-0 last:mb-0">
+                {part.lang && part.lang !== 'text' && (
+                  <div className="flex items-center rounded-t-lg bg-gray-800 px-3 py-1.5">
+                    <span className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
+                      {part.lang}
+                    </span>
+                  </div>
+                )}
+                <pre
+                  className={`overflow-x-auto bg-gray-900 p-3 text-xs leading-relaxed text-gray-100 ${
+                    part.lang && part.lang !== 'text' ? 'rounded-b-lg' : 'rounded-lg'
+                  }`}
+                >
+                  <code>{part.value}</code>
+                </pre>
+              </div>
+            ) : (
+              <p key={i} className="whitespace-pre-wrap">
+                {part.value}
+              </p>
+            ),
+          )}
+        </div>
+        {time && (
+          <span className={`mt-1 text-[10px] ${isUser ? 'text-gray-300' : 'text-gray-400'}`}>
+            {time}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Message Attachment (in bubble) ------------------------------------
+
+function MessageAttachment({ attachment, isUser }) {
+  const url = attachment._localUrl || attachment.storage_url;
+  const category = attachment.category || (attachment.mime_type?.startsWith('image/') ? 'image' : attachment.mime_type?.startsWith('audio/') ? 'audio' : 'video');
+
+  if (category === 'image') {
+    return (
+      <div className="overflow-hidden rounded-xl">
+        <img
+          src={url}
+          alt={attachment.filename}
+          className="max-h-64 max-w-full rounded-xl object-cover"
+          loading="lazy"
+        />
+      </div>
+    );
+  }
+
+  if (category === 'audio') {
+    return (
+      <div className={`flex items-center gap-2 rounded-xl px-3 py-2 ${isUser ? 'bg-indigo-500/30' : 'bg-gray-200'}`}>
+        <svg className={`h-4 w-4 flex-shrink-0 ${isUser ? 'text-indigo-200' : 'text-gray-500'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
+        </svg>
+        <audio controls className="h-8 max-w-[220px]" preload="metadata">
+          <source src={url} type={attachment.mime_type} />
+        </audio>
+        <span className={`truncate text-[10px] ${isUser ? 'text-indigo-200' : 'text-gray-500'}`}>{attachment.filename}</span>
+      </div>
+    );
+  }
+
+  if (category === 'video') {
+    return (
+      <div className="overflow-hidden rounded-xl">
+        <video controls className="max-h-64 max-w-full rounded-xl" preload="metadata">
+          <source src={url} type={attachment.mime_type} />
+        </video>
+      </div>
+    );
+  }
+
+  return null;
+}
+
+// ---------- Attachment Preview (pending, in input area) ----------------------
+
+function AttachmentPreview({ file, onRemove }) {
+  const isImage = file.type.startsWith('image/');
+  const isAudio = file.type.startsWith('audio/');
+  const isVideo = file.type.startsWith('video/');
+  const previewUrl = useMemo(() => (isImage ? URL.createObjectURL(file) : null), [file, isImage]);
+
+  return (
+    <div className="group relative flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5">
+      {isImage && previewUrl && (
+        <img src={previewUrl} alt={file.name} className="h-8 w-8 rounded object-cover" />
+      )}
+      {isAudio && (
+        <svg className="h-5 w-5 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
+        </svg>
+      )}
+      {isVideo && (
+        <svg className="h-5 w-5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z" />
+        </svg>
+      )}
+      <span className="max-w-[120px] truncate text-xs text-gray-600">{file.name}</span>
+      <span className="text-[10px] text-gray-400">
+        {file.size < 1024 * 1024
+          ? `${(file.size / 1024).toFixed(0)} KB`
+          : `${(file.size / (1024 * 1024)).toFixed(1)} MB`}
+      </span>
+      <button
+        onClick={onRemove}
+        className="ml-1 rounded-full p-0.5 text-gray-300 transition-colors hover:bg-red-50 hover:text-red-500"
+        title="Remove"
+      >
+        <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+// ---------- Secrets Detection Card -------------------------------------------
+
+function SecretsDetectionCard({
+  detectedSecrets,
+  secretValues,
+  onSecretChange,
+  onSubmit,
+  onDismiss,
+  isSaving,
+}) {
+  return (
+    <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 shadow-sm">
+      {/* Header */}
+      <div className="mb-3 flex items-start gap-3">
+        <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-amber-100">
+          <svg className="h-5 w-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+          </svg>
+        </div>
+        <div>
+          <h3 className="text-sm font-semibold text-amber-900">Secrets Required</h3>
+          <p className="mt-0.5 text-xs text-amber-700/70">
+            These values are stored encrypted and never sent to AI.
+          </p>
+        </div>
+      </div>
+
+      {/* Secret inputs */}
+      <div className="space-y-3">
+        {detectedSecrets.map((secret) => (
+          <div key={secret.key} className="rounded-lg bg-white/60 p-3">
+            <div className="mb-1.5 flex items-center gap-2">
+              <span className="text-xs font-medium text-gray-700">
+                {secret.label || secret.key}
+              </span>
+              <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                LANG_COLORS[secret.type] || 'bg-gray-200 text-gray-600'
+              }`}>
+                {(secret.type || 'api_key').replace(/_/g, ' ')}
+              </span>
+            </div>
+            <input
+              type="password"
+              value={secretValues[secret.key]?.value || ''}
+              onChange={(e) =>
+                onSecretChange((prev) => ({
+                  ...prev,
+                  [secret.key]: { ...prev[secret.key], value: e.target.value },
+                }))
+              }
+              className="w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm placeholder-gray-400 transition-colors focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-100"
+              placeholder={`Enter ${secret.label || secret.key}`}
+            />
+          </div>
+        ))}
+      </div>
+
+      {/* Actions */}
+      <div className="mt-4 flex items-center gap-2">
+        <button
+          onClick={onSubmit}
+          disabled={isSaving}
+          className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-amber-700 hover:shadow-md disabled:opacity-50"
+        >
+          {isSaving ? (
+            <span className="flex items-center gap-2">
+              <svg className="h-3.5 w-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Saving...
+            </span>
+          ) : (
+            'Save Secrets & Continue'
+          )}
+        </button>
+        <button
+          onClick={onDismiss}
+          disabled={isSaving}
+          className="rounded-lg px-4 py-2 text-sm text-amber-700 transition-colors hover:bg-amber-100 disabled:opacity-50"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Preview Tab -------------------------------------------------------
+
+function PreviewTab({ project }) {
+  const url = project?.deployment_url || project?.deploymentUrl;
+
+  if (!url) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center p-8 text-center">
+        <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-gray-100">
+          <svg className="h-7 w-7 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+          </svg>
+        </div>
+        <h3 className="mb-1.5 text-sm font-semibold text-gray-700">No deployment yet</h3>
+        <p className="max-w-xs text-xs text-gray-400">
+          Deploy your app to see a live preview. Build it first by chatting with the AI.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center gap-2 border-b border-gray-100 bg-gray-50 px-4 py-2">
+        <div className="flex gap-1">
+          <span className="h-2.5 w-2.5 rounded-full bg-red-400" />
+          <span className="h-2.5 w-2.5 rounded-full bg-yellow-400" />
+          <span className="h-2.5 w-2.5 rounded-full bg-green-400" />
+        </div>
+        <div className="flex-1 rounded-md bg-white px-3 py-1 text-xs text-gray-400 truncate border border-gray-200">
+          {url}
+        </div>
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-600"
+          title="Open in new tab"
+        >
+          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+          </svg>
+        </a>
+      </div>
+      <iframe
+        src={url}
+        title="App Preview"
+        className="flex-1 border-0"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+      />
+    </div>
+  );
+}
+
+// ---------- Files Tab ---------------------------------------------------------
+
+function FilesTab({ files, selectedFile, onSelectFile, collapsedFolders, onToggleFolder }) {
+  const fileList = Array.isArray(files) ? files : [];
+  const tree = useMemo(() => buildFileTree(fileList), [fileList]);
+
+  return (
+    <div className="flex h-full">
+      {/* File tree sidebar */}
+      <div className="w-56 flex-shrink-0 overflow-y-auto border-r border-gray-200 bg-gray-50/50">
+        <div className="flex items-center justify-between px-4 py-3">
+          <span className="text-[10px] font-semibold uppercase tracking-widest text-gray-400">
+            Files
+          </span>
+          {fileList.length > 0 && (
+            <span className="rounded-full bg-gray-200 px-2 py-0.5 text-[10px] font-medium text-gray-500">
+              {fileList.length}
+            </span>
+          )}
+        </div>
+
+        {fileList.length === 0 ? (
+          <div className="px-4 py-8 text-center">
+            <svg className="mx-auto mb-2 h-6 w-6 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+            </svg>
+            <p className="text-xs text-gray-400">No files generated yet</p>
+          </div>
+        ) : (
+          <div className="pb-4">
+            <FileTreeNode
+              node={tree}
+              path=""
+              selectedPath={selectedFile?.file_path || selectedFile?.path}
+              onSelectFile={onSelectFile}
+              collapsedFolders={collapsedFolders}
+              onToggleFolder={onToggleFolder}
+              isRoot
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Code viewer */}
+      <div className="flex flex-1 flex-col overflow-hidden">
+        {selectedFile ? (
+          <>
+            {/* File header */}
+            <div className="flex items-center gap-2 border-b border-gray-200 bg-gray-50 px-4 py-2.5">
+              <span className="truncate text-xs font-medium text-gray-600">
+                {selectedFile.file_path || selectedFile.path}
+              </span>
+              {(() => {
+                const lang = selectedFile.language || detectLanguage(selectedFile.file_path || selectedFile.path);
+                if (!lang) return null;
+                const colorClass = LANG_COLORS[lang] || 'bg-gray-200 text-gray-600';
+                return (
+                  <span className={`ml-auto flex-shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${colorClass}`}>
+                    {lang}
+                  </span>
+                );
+              })()}
+            </div>
+            {/* Code content */}
+            <div className="flex-1 overflow-auto bg-gray-950 p-4">
+              <pre className="text-xs leading-relaxed text-gray-100">
+                <code>{selectedFile.content || '// No content available'}</code>
+              </pre>
+            </div>
+          </>
+        ) : (
+          <div className="flex h-full flex-col items-center justify-center text-center">
+            <svg className="mb-3 h-8 w-8 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+            </svg>
+            <p className="text-xs text-gray-400">Select a file to view its contents</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- File Tree Node (recursive) ----------------------------------------
+
+function FileTreeNode({ node, path, selectedPath, onSelectFile, collapsedFolders, onToggleFolder, isRoot }) {
+  const folderNames = Object.keys(node.children).sort();
+  const fileItems = [...node.files].sort((a, b) =>
+    (a.displayName || '').localeCompare(b.displayName || ''),
+  );
+
+  return (
+    <div className={isRoot ? 'px-2' : 'pl-3'}>
+      {/* Folders */}
+      {folderNames.map((name) => {
+        const folderPath = path ? `${path}/${name}` : name;
+        const isCollapsed = collapsedFolders.has(folderPath);
+        const child = node.children[name];
+        return (
+          <div key={folderPath}>
+            <button
+              onClick={() => onToggleFolder(folderPath)}
+              className="flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-xs text-gray-600 transition-colors hover:bg-gray-100"
+            >
+              <svg
+                className={`h-3 w-3 flex-shrink-0 text-gray-400 transition-transform ${isCollapsed ? '' : 'rotate-90'}`}
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+              <svg className="h-3.5 w-3.5 flex-shrink-0 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+              </svg>
+              <span className="truncate font-medium">{name}</span>
+            </button>
+            {!isCollapsed && (
+              <FileTreeNode
+                node={child}
+                path={folderPath}
+                selectedPath={selectedPath}
+                onSelectFile={onSelectFile}
+                collapsedFolders={collapsedFolders}
+                onToggleFolder={onToggleFolder}
+              />
+            )}
+          </div>
+        );
+      })}
+
+      {/* Files */}
+      {fileItems.map((file) => {
+        const filePath = file.file_path || file.path || '';
+        const isSelected = selectedPath === filePath;
+        const lang = file.language || detectLanguage(filePath);
+        const icon = FILE_ICONS[lang] || '~';
+        const iconColor = lang ? (LANG_COLORS[lang] || 'bg-gray-200 text-gray-600') : 'bg-gray-200 text-gray-600';
+
+        return (
+          <button
+            key={filePath}
+            onClick={() => onSelectFile(file)}
+            className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs transition-colors ${
+              isSelected
+                ? 'bg-indigo-50 text-indigo-700 font-medium'
+                : 'text-gray-600 hover:bg-gray-100'
+            }`}
+            title={filePath}
+          >
+            <span className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded text-[8px] font-bold ${iconColor}`}>
+              {icon}
+            </span>
+            <span className="truncate">{file.displayName || filePath.split('/').pop()}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------- GitHub Modal ------------------------------------------------------
+
+function GitHubModal({
+  onClose,
+  onCreateRepo,
+  onConnectGitHub,
+  repoName,
+  onRepoNameChange,
+  isPrivate,
+  onPrivateChange,
+  projectName,
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+        <div className="mb-5 flex items-center justify-between">
+          <h3 className="text-lg font-semibold text-gray-900">Connect to GitHub</h3>
+          <button onClick={onClose} className="rounded-lg p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Create new repo */}
+        <form onSubmit={onCreateRepo} className="mb-5">
+          <h4 className="mb-3 text-sm font-medium text-gray-700">Create a new repository</h4>
+          <div className="space-y-3">
+            <input
+              type="text"
+              placeholder="Repository name"
+              value={repoName}
+              onChange={(e) => onRepoNameChange(e.target.value)}
+              className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm placeholder-gray-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+            />
+            <label className="flex items-center gap-2 text-sm text-gray-600">
+              <input
+                type="checkbox"
+                checked={isPrivate}
+                onChange={(e) => onPrivateChange(e.target.checked)}
+                className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+              />
+              Private repository
+            </label>
+            <button
+              type="submit"
+              disabled={!repoName.trim()}
+              className="w-full rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-gray-800 disabled:opacity-40"
+            >
+              Create repo & push code
+            </button>
+          </div>
+        </form>
+
+        <div className="relative mb-5">
+          <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-200" /></div>
+          <div className="relative flex justify-center text-xs"><span className="bg-white px-3 text-gray-400">or</span></div>
+        </div>
+
+        {/* Connect existing account */}
+        <button
+          onClick={onConnectGitHub}
+          className="flex w-full items-center justify-center gap-2 rounded-lg border border-gray-200 px-4 py-2.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+        >
+          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z" />
+          </svg>
+          Connect GitHub account
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Secrets Tab -------------------------------------------------------
+
+function SecretsTab({ secrets, newSecret, onNewSecretChange, onAddSecret, onDeleteSecret }) {
+  return (
+    <div className="h-full overflow-y-auto p-5">
+      {/* Header */}
+      <div className="mb-4 flex items-center gap-2">
+        <svg className="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+        </svg>
+        <h3 className="text-sm font-semibold text-gray-900">Project Secrets</h3>
+      </div>
+
+      {/* Info notice */}
+      <div className="mb-5 flex items-start gap-2 rounded-lg bg-blue-50 p-3">
+        <svg className="mt-0.5 h-4 w-4 flex-shrink-0 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <p className="text-xs text-blue-600">
+          Secrets are encrypted at rest and never exposed to AI models. They are only injected into your deployed application at runtime.
+        </p>
+      </div>
+
+      {/* Existing secrets */}
+      {secrets.length === 0 ? (
+        <div className="mb-6 rounded-lg border border-dashed border-gray-200 p-6 text-center">
+          <svg className="mx-auto mb-2 h-6 w-6 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+          </svg>
+          <p className="text-xs text-gray-400">No secrets configured yet</p>
+        </div>
+      ) : (
+        <ul className="mb-6 space-y-2">
+          {secrets.map((secret) => (
+            <li
+              key={secret.id}
+              className="group flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3 transition-colors hover:border-gray-300"
+            >
+              <div className="flex items-center gap-3">
+                <div className="flex h-8 w-8 items-center justify-center rounded-md bg-gray-100">
+                  <svg className="h-4 w-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+                  </svg>
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-gray-800">{secret.key}</p>
+                  <span className="mt-0.5 inline-block rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-500">
+                    {(secret.type || 'api_key').replace(/_/g, ' ')}
+                  </span>
+                </div>
+              </div>
+              <button
+                onClick={() => onDeleteSecret(secret.id)}
+                className="rounded-md p-1.5 text-gray-300 opacity-0 transition-all hover:bg-red-50 hover:text-red-500 group-hover:opacity-100"
+                title="Delete secret"
+              >
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* Add secret form */}
+      <form onSubmit={onAddSecret} className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+        <h4 className="mb-3 text-xs font-semibold text-gray-700">Add a new secret</h4>
+        <div className="space-y-2.5">
+          <input
+            type="text"
+            placeholder="Key name (e.g. OPENAI_API_KEY)"
+            value={newSecret.key}
+            onChange={(e) => onNewSecretChange({ ...newSecret, key: e.target.value })}
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm placeholder-gray-400 transition-colors focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+          />
+          <input
+            type="password"
+            placeholder="Secret value"
+            value={newSecret.value}
+            onChange={(e) => onNewSecretChange({ ...newSecret, value: e.target.value })}
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm placeholder-gray-400 transition-colors focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+          />
+          <select
+            value={newSecret.type}
+            onChange={(e) => onNewSecretChange({ ...newSecret, type: e.target.value })}
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 transition-colors focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+          >
+            {SECRET_TYPES.map((t) => (
+              <option key={t} value={t}>
+                {t.replace(/_/g, ' ')}
+              </option>
+            ))}
+          </select>
+          <button
+            type="submit"
+            disabled={!newSecret.key.trim() || !newSecret.value.trim()}
+            className="w-full rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition-all hover:bg-indigo-700 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Add Secret
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}

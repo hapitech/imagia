@@ -1,0 +1,10 @@
+{
+  "name": "@imagia/shared",
+  "version": "1.0.0",
+  "description": "Shared constants, types, and validation schemas",
+  "main": "src/index.js",
+  "scripts": {},
+  "dependencies": {
+    "joi": "^17.13.3"
+  }
+}
