@@ -1,0 +1,4 @@
+node_modules/
+marketing/
+*.tgz
+.env
