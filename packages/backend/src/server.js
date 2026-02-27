@@ -37,7 +37,20 @@ if (config.sentryDsn) {
 }
 
 // Security
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: config.isProduction ? {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "https://*.clerk.accounts.dev"],
+      connectSrc: ["'self'", "https://*.clerk.accounts.dev", "https://api.clerk.com"],
+      frameSrc: ["'self'", "https://*.clerk.accounts.dev"],
+      imgSrc: ["'self'", "data:", "https://*.clerk.com", "https://img.clerk.com"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      workerSrc: ["'self'", "blob:"],
+      fontSrc: ["'self'", "data:"],
+    },
+  } : false,
+}));
 app.use(cors({
   origin: [config.frontendUrl, 'http://localhost:5173'],
   credentials: true,
