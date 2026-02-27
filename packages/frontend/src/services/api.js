@@ -53,7 +53,7 @@ export function getProject(id) {
 }
 
 export function updateProject(id, data) {
-  return api.put(`/projects/${id}`, data).then((r) => r.data);
+  return api.patch(`/projects/${id}`, data).then((r) => r.data);
 }
 
 export function deleteProject(id) {

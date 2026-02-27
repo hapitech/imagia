@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { UserButton } from '@clerk/clerk-react';
+import useAuth from '../../hooks/useAuth';
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: DashboardIcon },
@@ -11,6 +12,7 @@ const navItems = [
 ];
 
 export default function Layout() {
+  useAuth(); // Wires up Clerk token getter for API requests
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
   return (

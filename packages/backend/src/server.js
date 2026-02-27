@@ -77,7 +77,16 @@ app.use('/api/github', githubRoutes);
 app.use('/api/marketing', marketingRoutes);
 app.use('/api/social', socialRoutes);
 
-// Error handling
+// In production, serve the frontend SPA from the built dist/ folder
+if (config.isProduction) {
+  const frontendDist = path.resolve(__dirname, '../../frontend/dist');
+  app.use(express.static(frontendDist));
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(frontendDist, 'index.html'));
+  });
+}
+
+// Error handling (only reached for API 404s in production, all routes in dev)
 app.use(notFoundHandler);
 app.use(errorHandler);
 

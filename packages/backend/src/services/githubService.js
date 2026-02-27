@@ -39,7 +39,7 @@ class GitHubService {
   getAuthorizationUrl(state) {
     const params = new URLSearchParams({
       client_id: config.githubClientId,
-      redirect_uri: `${config.frontendUrl}/api/github/callback`,
+      redirect_uri: `${config.frontendUrl}/github/callback`,
       scope: 'repo user:email',
       state,
     });

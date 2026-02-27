@@ -1,5 +1,2 @@
-web: cd packages/backend && npm start
-worker_build: cd packages/backend && npm run worker:build
-worker_marketing: cd packages/backend && npm run worker:marketing
-worker_deploy: cd packages/backend && npm run worker:deploy
-worker_social: cd packages/backend && npm run worker:social
+web: npm run db:migrate && cd packages/backend && npm start
+worker: cd packages/backend && npm run worker:all
