@@ -10,7 +10,12 @@
  * - Check sync status (ahead/behind/diverged)
  */
 
-const { Octokit } = require('@octokit/rest');
+// @octokit/rest v21+ is ESM-only, use dynamic import
+let Octokit;
+const octokitReady = import('@octokit/rest').then((mod) => {
+  Octokit = mod.Octokit;
+});
+
 const axios = require('axios');
 const { db } = require('../config/database');
 const { encrypt, decrypt } = require('../utils/encryption');
@@ -26,6 +31,7 @@ class GitHubService {
       'github-api',
       { timeout: 30000 }
     );
+    this.ready = octokitReady;
     logger.info('GitHubService initialized');
   }
 
@@ -88,6 +94,7 @@ class GitHubService {
    * Get an authenticated Octokit instance for a user.
    */
   async _getOctokit(userId) {
+    await this.ready;
     const user = await db('users').where({ id: userId }).select('github_access_token').first();
     if (!user?.github_access_token) {
       throw new Error('GitHub account not connected. Please connect your GitHub account first.');
