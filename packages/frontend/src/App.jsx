@@ -11,6 +11,8 @@ import Settings from './pages/Settings';
 import SignInPage from './pages/SignIn';
 import SignUpPage from './pages/SignUp';
 import GitHubCallback from './pages/GitHubCallback';
+import PrivacyPolicy from './pages/PrivacyPolicy';
+import TermsOfService from './pages/TermsOfService';
 
 function ProtectedRoute({ children }) {
   return (
@@ -29,6 +31,8 @@ export default function App() {
       <Route path="/sign-in/*" element={<SignInPage />} />
       <Route path="/sign-up/*" element={<SignUpPage />} />
       <Route path="/github/callback" element={<GitHubCallback />} />
+      <Route path="/privacy" element={<PrivacyPolicy />} />
+      <Route path="/terms" element={<TermsOfService />} />
 
       <Route
         path="/"
