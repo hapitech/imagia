@@ -13,7 +13,8 @@ AI-powered app builder (like replit.com) that generates code from natural langua
   - Llama 3.3 70B (Fireworks) for scaffolding/config
   - GPT-4o (OpenAI) for marketing copy
   - Each provider has circuit breaker + retry + 2-layer cache
-- **Deployment**: Vercel (frontend) + Railway (backend + DB + Redis + user apps)
+- **Deployment**: Railway (monorepo - web serves frontend + API, worker runs Bull queues, managed Postgres + Redis). Auto-deploys from GitHub `main` branch.
+- **Domain Routing**: Cloudflare DNS (wildcard `*.imagia.net`) + Cloudflare Worker (`imagia-proxy`) + Workers KV for subdomain→Railway URL routing. User apps get auto-assigned `<slug>.imagia.net` subdomains. Custom domains via Cloudflare for SaaS (Custom Hostnames API).
 - **Cost Tracking**: `costTracker.js` tracks LLM, deployment, storage, and marketing costs per-project
 - **Patterns from Pikto repo**: Circuit breakers (opossum), exponential backoff retry, L1/L2 caching, SSE via Redis pub/sub, Winston structured logging, Sentry error tracking, correlation IDs
 
@@ -26,7 +27,7 @@ AI-powered app builder (like replit.com) that generates code from natural langua
 - **File attachments**: Chat supports image/audio/video uploads via multer + message_attachments table
 
 ## Database (PostgreSQL)
-14 migrations:
+15 migrations:
 1. `users` - Clerk-synced with github_access_token
 2. `projects` - Apps with status, cost_breakdown JSONB, deployment info, context_md, GitHub fields
 3. `project_versions` - Snapshots at each iteration
@@ -41,6 +42,7 @@ AI-powered app builder (like replit.com) that generates code from natural langua
 12. `llm_usage_daily` - Aggregated daily LLM metrics per user/provider/model
 13. `social_accounts` - OAuth connections for Twitter, LinkedIn, Instagram, Facebook
 14. `scheduled_posts` - Social media posts with scheduling, engagement tracking
+15. `project_domains` - Domain assignments (auto subdomains + custom domains) with Cloudflare IDs and SSL status
 
 ## Current State (All 5 Phases Complete)
 
@@ -57,14 +59,15 @@ AI-powered app builder (like replit.com) that generates code from natural langua
 - ProjectBuilder.jsx with chat UI, file viewer, secrets, file uploads
 
 ### Phase 3 (Deployment + GitHub + Marketing) - DONE
-- **Railway deployment**: `railwayService.js` (GraphQL API - create project/service, deploy, poll status, generate domain, custom domains), `deployWorker.js` (Bull worker with 7 stages, SSE progress, auto-triggers marketing gen), `routes/deployments.js` (queue deploy, status, history, logs, custom domain, costs)
+- **Railway deployment**: `railwayService.js` (GraphQL API - create project/service, deploy, poll status, generate domain, custom domains), `deployWorker.js` (Bull worker with 7 stages, SSE progress, auto-assigns `*.imagia.net` subdomain via Cloudflare KV, auto-triggers marketing gen), `routes/deployments.js` (queue deploy, status, history, logs, custom domain, costs)
+- **Cloudflare integration**: `cloudflareService.js` (Workers KV for subdomain routing, DNS records, Custom Hostnames for user custom domains), `routes/domains.js` (list domains, add/remove custom domain, SSL status, verify)
 - **GitHub integration**: `githubService.js` (Octokit - OAuth, importRepo, pushToGitHub, pullFromGitHub, createRepo, syncStatus), `routes/github.js` (connect, callback, list repos, import, push, pull, create-repo, sync-status, disconnect)
 - **Screenshot/Video**: `screenshotService.js` (Playwright - desktop full page, mobile, multi-state), `videoService.js` (Playwright video recording with step-by-step demo)
 - **Marketing pipeline**: `marketingWorker.js` (generates screenshots, video demo, landing page, social posts for 4 platforms, ad copy for 3 platforms, email templates for 3 types), `routes/marketing.js` (generate, list/get/delete assets, regenerate)
 - **Cost tracking**: `costTracker.js` (tracks deployment, compute, storage, LLM costs per-project, user-level cost summary with daily trends)
 - **Marketing prompts**: `utils/prompts/marketing.js` (landing page, social posts, ad copy, email templates, demo script)
-- **Frontend**: Deploy button in ProjectBuilder header, GitHub push/pull/create-repo modal, Marketing Studio page with asset grid/filter/preview/regenerate
-- **Routes mounted**: `/api/deployments`, `/api/github`, `/api/marketing`
+- **Frontend**: Deploy button in ProjectBuilder header, Domains tab (auto-subdomain display, add/remove custom domains, SSL status), GitHub push/pull/create-repo modal, Marketing Studio page with asset grid/filter/preview/regenerate
+- **Routes mounted**: `/api/deployments`, `/api/github`, `/api/marketing`, `/api/domains`
 
 ### Phase 4 (Analytics + Prompt History) - DONE
 - **Migration 012**: `llm_usage_daily` table - aggregated daily metrics per user/provider/model with upsert
@@ -85,8 +88,14 @@ AI-powered app builder (like replit.com) that generates code from natural langua
 - **Environment**: Added TWITTER_CLIENT_ID/SECRET, LINKEDIN_CLIENT_ID/SECRET, FACEBOOK_APP_ID/SECRET, SOCIAL_OAUTH_CALLBACK_URL to config + .env.example
 - **Route mounted**: `/api/social`
 
+## Production Infrastructure
+- **Railway**: Web service (Express API + frontend SPA), Worker service (all Bull queues), managed PostgreSQL, managed Redis. Auto-deploys from `main` branch via GitHub integration.
+- **Cloudflare**: DNS for `imagia.net` (wildcard `*.imagia.net`), Worker `imagia-proxy` proxies traffic to Railway with KV-based routing, free SSL via wildcard cert. Custom domains via Cloudflare for SaaS.
+- **Clerk**: Production mode on `clerk.imagia.net` / `accounts.imagia.net`. Webhook at `/api/auth/webhook`.
+- **Domain**: https://imagia.net (Cloudflare Worker → Railway)
+
 ## Environment Variables Needed
-See `.env.example` for full list. Priority: CLERK keys, DATABASE_URL, REDIS_URL, ANTHROPIC_API_KEY, FIREWORKS_API_KEY, OPENAI_API_KEY, SECRETS_ENCRYPTION_KEY (32-byte hex), RAILWAY_API_TOKEN, GITHUB_CLIENT_ID + SECRET, TWITTER_CLIENT_ID + SECRET, LINKEDIN_CLIENT_ID + SECRET, FACEBOOK_APP_ID + SECRET
+See `.env.example` for full list. Priority: CLERK keys, DATABASE_URL, REDIS_URL, ANTHROPIC_API_KEY, FIREWORKS_API_KEY, OPENAI_API_KEY, SECRETS_ENCRYPTION_KEY (32-byte hex), RAILWAY_API_TOKEN, GITHUB_CLIENT_ID + SECRET, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ZONE_ID, CLOUDFLARE_KV_NAMESPACE_ID, TWITTER_CLIENT_ID + SECRET, LINKEDIN_CLIENT_ID + SECRET, FACEBOOK_APP_ID + SECRET
 
 ## File Count
-~115 source files across 3 packages
+~120 source files across 3 packages
