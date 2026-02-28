@@ -21,6 +21,7 @@ const { promisify } = require('util');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const axios = require('axios');
 const { db } = require('../config/database');
 const config = require('../config/environment');
 const logger = require('../config/logger');
@@ -28,6 +29,7 @@ const { generateDockerfile, generateDockerignore } = require('../utils/dockerfil
 const { generateContentHash } = require('../utils/contentHash');
 
 const execFileAsync = promisify(execFile);
+const RAILWAY_API = 'https://backboard.railway.app/graphql/v2';
 
 class RailwayCliService {
   constructor() {
@@ -39,11 +41,16 @@ class RailwayCliService {
   /**
    * Deploy a project to Railway via CLI.
    *
+   * The Railway CLI requires a project-scoped token (not account API token)
+   * and a service name (not ID). We create a project token via GraphQL,
+   * then run `railway up -s SERVICE_NAME --detach`.
+   *
    * @param {Object} options
    * @param {string} options.projectId        - Imagia project UUID
    * @param {string} options.railwayProjectId - Railway project UUID
-   * @param {string} options.railwayServiceId - Railway service UUID
+   * @param {string} options.railwayServiceId - Railway service UUID (for token scoping)
    * @param {string} options.environmentId    - Railway environment UUID
+   * @param {string} options.serviceName      - Railway service name (for CLI -s flag)
    * @param {string} options.appType          - Framework type (react, express, etc.)
    * @param {function} [options.onProgress]   - Progress callback(message)
    * @returns {Promise<{ success: boolean }>}
@@ -54,6 +61,7 @@ class RailwayCliService {
       railwayProjectId,
       railwayServiceId,
       environmentId,
+      serviceName,
       appType,
       onProgress,
     } = options;
@@ -140,24 +148,29 @@ class RailwayCliService {
 
       if (onProgress) onProgress('Uploading source to Railway...');
 
-      // 7. Run `railway up` with project/service/environment flags
+      // 7. Create a project-scoped token for the CLI
+      //    The Railway CLI requires a project token, not the account API token.
+      const projectToken = await this._createProjectToken(
+        railwayProjectId,
+        environmentId
+      );
+
+      // 8. Run `railway up` with service name (CLI requires name, not ID)
       const env = {
         ...process.env,
-        RAILWAY_TOKEN: config.railwayApiToken,
+        RAILWAY_TOKEN: projectToken,
       };
 
       const args = [
         'up',
-        '-p', railwayProjectId,
-        '-s', railwayServiceId,
-        '-e', environmentId,
+        '-s', serviceName || railwayServiceId,
         '--detach',
       ];
 
       logger.info('Executing railway up', {
         projectId,
         railwayProjectId,
-        railwayServiceId,
+        serviceName,
         args: args.join(' '),
       });
 
@@ -188,6 +201,45 @@ class RailwayCliService {
         }
       }
     }
+  }
+
+  /**
+   * Create a project-scoped token via Railway GraphQL API.
+   * The Railway CLI requires this (account API tokens are rejected by `railway up`).
+   * @private
+   */
+  async _createProjectToken(railwayProjectId, environmentId) {
+    const response = await axios.post(
+      RAILWAY_API,
+      {
+        query: `mutation($input: ProjectTokenCreateInput!) {
+          projectTokenCreate(input: $input)
+        }`,
+        variables: {
+          input: {
+            projectId: railwayProjectId,
+            environmentId,
+            name: `imagia-deploy-${Date.now()}`,
+          },
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${config.railwayApiToken}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 15000,
+      }
+    );
+
+    if (response.data.errors) {
+      const errMsg = response.data.errors.map((e) => e.message).join('; ');
+      throw new Error(`Failed to create Railway project token: ${errMsg}`);
+    }
+
+    const token = response.data.data.projectTokenCreate;
+    logger.info('Created Railway project token for CLI deploy', { railwayProjectId });
+    return token;
   }
 
   /**

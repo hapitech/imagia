@@ -201,6 +201,7 @@ deployQueue.process(async (job) => {
         railwayProjectId,
         railwayServiceId,
         environmentId,
+        serviceName: project.name,
         appType: project.app_type,
         onProgress: (msg) => emitProgress(projectId, 55, 'deploying', msg),
       });

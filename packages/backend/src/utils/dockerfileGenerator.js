@@ -64,7 +64,7 @@ function reactViteDockerfile() {
   return `FROM node:20-alpine AS build
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+RUN npm install
 COPY . .
 RUN npm run build
 
@@ -81,7 +81,7 @@ function expressDockerfile(options) {
   return `FROM node:20-alpine
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm install --production
 COPY . .
 CMD ["node", "${entryPoint}"]
 `;
@@ -91,7 +91,7 @@ function nextjsDockerfile() {
   return `FROM node:20-alpine AS build
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+RUN npm install
 COPY . .
 RUN npm run build
 
