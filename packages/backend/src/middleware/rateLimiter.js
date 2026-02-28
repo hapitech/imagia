@@ -11,6 +11,7 @@ const apiLimiter = rateLimit({
     error: 'Too Many Requests',
     message: 'Rate limit exceeded. Please try again later.',
   },
+  validate: { xForwardedForHeader: false },
 });
 
 const processLimiter = rateLimit({
@@ -22,6 +23,7 @@ const processLimiter = rateLimit({
     error: 'Too Many Requests',
     message: 'Processing rate limit exceeded.',
   },
+  validate: { xForwardedForHeader: false },
 });
 
 module.exports = { apiLimiter, processLimiter };

@@ -19,14 +19,18 @@ function requireUser(req, res, next) {
     .then((user) => {
       if (!user) {
         // User exists in Clerk but not in our DB yet (webhook may not have fired)
+        // Use clerk ID as placeholder email if none available (email column is unique + not null)
+        const email = auth.sessionClaims?.email || `${auth.userId}@clerk.placeholder`;
         return db('users')
           .insert({
             clerk_id: auth.userId,
-            email: auth.sessionClaims?.email || 'unknown',
+            email,
             name: auth.sessionClaims?.name || null,
           })
+          .onConflict('clerk_id')
+          .merge({ updated_at: db.fn.now() })
           .returning('*')
-          .then(([newUser]) => newUser);
+          .then(([newUser]) => newUser || db('users').where({ clerk_id: auth.userId }).first());
       }
       return user;
     })

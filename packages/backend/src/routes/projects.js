@@ -3,6 +3,7 @@ const Joi = require('joi');
 const { db } = require('../config/database');
 const { requireUser } = require('../middleware/auth');
 const { validate } = require('../middleware/requestValidator');
+const cloudflareService = require('../services/cloudflareService');
 
 const router = express.Router();
 
@@ -155,6 +156,30 @@ router.patch('/:id', validate(updateProjectSchema), async (req, res, next) => {
 // DELETE /:id - Delete project
 router.delete('/:id', async (req, res, next) => {
   try {
+    // Clean up Cloudflare resources before deleting
+    const domains = await db('project_domains')
+      .where({ project_id: req.params.id });
+
+    for (const domain of domains) {
+      try {
+        if (domain.subdomain_slug) {
+          await cloudflareService.deleteKvEntry(domain.subdomain_slug);
+        }
+        if (domain.domain_type === 'custom') {
+          await cloudflareService.deleteKvEntry(domain.domain);
+        }
+        if (domain.cloudflare_hostname_id) {
+          await cloudflareService.deleteCustomHostname(domain.cloudflare_hostname_id);
+        }
+        if (domain.cloudflare_record_id) {
+          await cloudflareService.deleteDnsRecord(domain.cloudflare_record_id);
+        }
+      } catch (cfErr) {
+        // Log but don't block project deletion
+        console.error('Cloudflare cleanup failed for domain:', domain.domain, cfErr.message);
+      }
+    }
+
     const deleted = await db('projects')
       .where({ id: req.params.id, user_id: req.user.id })
       .del();

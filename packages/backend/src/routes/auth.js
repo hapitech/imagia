@@ -43,14 +43,22 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         const email =
           data.email_addresses && data.email_addresses.length > 0
             ? data.email_addresses[0].email_address
-            : null;
+            : `${data.id}@clerk.placeholder`;
 
-        await db('users').insert({
-          clerk_id: data.id,
-          email: email,
-          name: [data.first_name, data.last_name].filter(Boolean).join(' ') || null,
-          avatar_url: data.image_url || null,
-        });
+        await db('users')
+          .insert({
+            clerk_id: data.id,
+            email,
+            name: [data.first_name, data.last_name].filter(Boolean).join(' ') || null,
+            avatar_url: data.image_url || null,
+          })
+          .onConflict('clerk_id')
+          .merge({
+            email,
+            name: [data.first_name, data.last_name].filter(Boolean).join(' ') || null,
+            avatar_url: data.image_url || null,
+            updated_at: db.fn.now(),
+          });
 
         logger.info('User created via webhook', { clerkId: data.id });
         break;
