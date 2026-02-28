@@ -33,6 +33,16 @@ const app = express();
 // Trust proxy (Railway runs behind a reverse proxy)
 app.set('trust proxy', 1);
 
+// Force HTTPS in production
+if (config.isProduction) {
+  app.use((req, res, next) => {
+    if (req.protocol === 'http') {
+      return res.redirect(301, `https://${req.headers.host}${req.url}`);
+    }
+    next();
+  });
+}
+
 // Sentry
 if (config.sentryDsn) {
   Sentry.init({
