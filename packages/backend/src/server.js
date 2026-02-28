@@ -56,8 +56,8 @@ app.use(helmet({
   contentSecurityPolicy: config.isProduction ? {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "https://*.clerk.accounts.dev", "https://clerk.imagia.net"],
-      connectSrc: ["'self'", "https://*.clerk.accounts.dev", "https://api.clerk.com", "https://clerk.imagia.net"],
+      scriptSrc: ["'self'", "https://*.clerk.accounts.dev", "https://clerk.imagia.net", "https://static.cloudflareinsights.com"],
+      connectSrc: ["'self'", "https://*.clerk.accounts.dev", "https://api.clerk.com", "https://clerk.imagia.net", "https://cloudflareinsights.com"],
       frameSrc: ["'self'", "https://*.clerk.accounts.dev", "https://accounts.imagia.net"],
       imgSrc: ["'self'", "data:", "https://*.clerk.com", "https://img.clerk.com", "https://*.imagia.net"],
       styleSrc: ["'self'", "'unsafe-inline'"],

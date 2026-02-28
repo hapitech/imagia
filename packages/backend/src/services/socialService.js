@@ -532,8 +532,8 @@ async function schedulePost({ userId, projectId, socialAccountId, content, media
 
 async function getPosts(userId, { projectId, status, page = 1, limit = 20 }) {
   const query = db('scheduled_posts')
-    .where({ user_id: userId })
     .leftJoin('social_accounts', 'scheduled_posts.social_account_id', 'social_accounts.id')
+    .where('scheduled_posts.user_id', userId)
     .select(
       'scheduled_posts.*',
       'social_accounts.platform_username',

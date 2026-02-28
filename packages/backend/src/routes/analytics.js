@@ -83,6 +83,38 @@ router.get('/llm-costs', async (req, res, next) => {
   }
 });
 
+// GET /llm-costs/by-model - Breakdown by model (must be before :projectId)
+router.get('/llm-costs/by-model', async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const days = Math.min(365, Math.max(1, parseInt(req.query.days, 10) || 30));
+    const sinceDate = new Date();
+    sinceDate.setDate(sinceDate.getDate() - days);
+
+    const byModel = await db('prompt_logs')
+      .where({ user_id: userId })
+      .where('created_at', '>=', sinceDate.toISOString())
+      .groupBy('provider', 'model')
+      .select(
+        'provider',
+        'model',
+        db.raw('COUNT(*) as requests'),
+        db.raw('COALESCE(SUM(total_cost), 0) as cost'),
+        db.raw('COALESCE(SUM(input_tokens), 0) as input_tokens'),
+        db.raw('COALESCE(SUM(output_tokens), 0) as output_tokens'),
+        db.raw('COALESCE(SUM(total_tokens), 0) as tokens'),
+        db.raw('COALESCE(AVG(latency_ms), 0) as avg_latency_ms'),
+        db.raw("COUNT(*) FILTER (WHERE status != 'success') as error_count"),
+        db.raw('COUNT(*) FILTER (WHERE cache_hit = true) as cache_hit_count')
+      )
+      .orderBy('cost', 'desc');
+
+    res.json({ by_model: byModel });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /llm-costs/:projectId - Per-project cost breakdown
 router.get('/llm-costs/:projectId', async (req, res, next) => {
   try {
@@ -137,38 +169,6 @@ router.get('/llm-costs/:projectId', async (req, res, next) => {
         by_task: byTask,
       },
     });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// GET /llm-costs/by-model - Breakdown by model
-router.get('/llm-costs/by-model', async (req, res, next) => {
-  try {
-    const userId = req.user.id;
-    const days = Math.min(365, Math.max(1, parseInt(req.query.days, 10) || 30));
-    const sinceDate = new Date();
-    sinceDate.setDate(sinceDate.getDate() - days);
-
-    const byModel = await db('prompt_logs')
-      .where({ user_id: userId })
-      .where('created_at', '>=', sinceDate.toISOString())
-      .groupBy('provider', 'model')
-      .select(
-        'provider',
-        'model',
-        db.raw('COUNT(*) as requests'),
-        db.raw('COALESCE(SUM(total_cost), 0) as cost'),
-        db.raw('COALESCE(SUM(input_tokens), 0) as input_tokens'),
-        db.raw('COALESCE(SUM(output_tokens), 0) as output_tokens'),
-        db.raw('COALESCE(SUM(total_tokens), 0) as tokens'),
-        db.raw('COALESCE(AVG(latency_ms), 0) as avg_latency_ms'),
-        db.raw("COUNT(*) FILTER (WHERE status != 'success') as error_count"),
-        db.raw('COUNT(*) FILTER (WHERE cache_hit = true) as cache_hit_count')
-      )
-      .orderBy('cost', 'desc');
-
-    res.json({ by_model: byModel });
   } catch (err) {
     next(err);
   }
