@@ -1617,9 +1617,23 @@ function PreviewTab({ project, files }) {
   const fileList = Array.isArray(files) ? files : [];
   const [refreshKey, setRefreshKey] = useState(0);
 
+  // Detect if this is a complex project with npm dependencies
+  const isComplexProject = useMemo(() => {
+    const pkgFile = fileList.find(f => (f.file_path || f.path || '') === 'package.json');
+    if (!pkgFile || !pkgFile.content) return false;
+    try {
+      const pkg = JSON.parse(pkgFile.content);
+      const deps = Object.keys(pkg.dependencies || {});
+      // If it has real npm deps beyond react basics, it's complex
+      const basicDeps = new Set(['react', 'react-dom', 'react-router-dom', 'react-router', 'next']);
+      return deps.some(d => !basicDeps.has(d));
+    } catch { return false; }
+  }, [fileList]);
+
   // Build an in-browser preview from the generated React/Vite/Next.js files
   const previewHtml = useMemo(() => {
     if (fileList.length === 0) return null;
+    if (isComplexProject) return null; // Skip Babel preview for complex projects
 
     // Gather files by path
     const fileMap = {};
@@ -1940,7 +1954,7 @@ function PreviewTab({ project, files }) {
     );
   }
 
-  // No files yet
+  // No preview — show contextual message
   return (
     <div className="flex h-full flex-col items-center justify-center p-8 text-center">
       <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-gray-100">
@@ -1948,10 +1962,28 @@ function PreviewTab({ project, files }) {
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
         </svg>
       </div>
-      <h3 className="mb-1.5 text-sm font-semibold text-gray-700">No preview available</h3>
-      <p className="max-w-xs text-xs text-gray-400">
-        Start chatting with the AI to build your app. A preview will appear here once files are generated.
-      </p>
+      {isComplexProject ? (
+        <>
+          <h3 className="mb-1.5 text-sm font-semibold text-gray-700">Deploy to preview</h3>
+          <p className="max-w-xs text-xs text-gray-400">
+            This project has npm dependencies that require a full build. Deploy it to see a live preview.
+          </p>
+        </>
+      ) : fileList.length === 0 ? (
+        <>
+          <h3 className="mb-1.5 text-sm font-semibold text-gray-700">No preview available</h3>
+          <p className="max-w-xs text-xs text-gray-400">
+            Start chatting with the AI to build your app. A preview will appear here once files are generated.
+          </p>
+        </>
+      ) : (
+        <>
+          <h3 className="mb-1.5 text-sm font-semibold text-gray-700">Preview not available</h3>
+          <p className="max-w-xs text-xs text-gray-400">
+            Could not render an in-browser preview. Try deploying the app for a live preview.
+          </p>
+        </>
+      )}
     </div>
   );
 }

@@ -20,8 +20,8 @@ export default function ImagiaLogo({ className }) {
       <rect x="22" y="55" width="20" height="3.5" rx="1.75" fill="#4338ca" />
       <path d="M24 59.5h16c0 3-3.5 4.5-8 4.5s-8-1.5-8-4.5z" fill="#3730a3" />
       {/* Leaf sprouting from top */}
-      <path d="M36 12c3-6 12-11 20-9-2 8-10 14-20 9z" fill="url(#imagia-leaf)" />
-      <path d="M36 12c5-4 13-8 20-9" stroke="#16a34a" strokeWidth="1.5" fill="none" strokeLinecap="round" />
+      <path d="M34 14c4-9 15-16 24-13-3 11-13 18-24 13z" fill="url(#imagia-leaf)" />
+      <path d="M34 14c6-5 16-11 24-13" stroke="#16a34a" strokeWidth="1.5" fill="none" strokeLinecap="round" />
     </svg>
   );
 }
