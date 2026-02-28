@@ -130,29 +130,59 @@ export default function Dashboard() {
         `width=${width},height=${height},left=${left},top=${top}`
       );
 
-      // Listen for the callback page to send the code via postMessage
-      function onMessage(event) {
-        if (event.origin !== window.location.origin) return;
-        if (event.data?.type !== 'github-oauth') return;
+      // Clean up any stale localStorage keys from prior attempts
+      try { localStorage.removeItem('github-oauth-code'); localStorage.removeItem('github-oauth-error'); } catch {}
+
+      let resolved = false;
+      function resolve(code, error) {
+        if (resolved) return;
+        resolved = true;
         window.removeEventListener('message', onMessage);
+        window.removeEventListener('storage', onStorage);
         clearInterval(closedCheck);
-        if (event.data.code) {
-          handleGhCallback(event.data.code);
+        if (code) {
+          handleGhCallback(code);
         } else {
-          setGhError(event.data.error || 'GitHub connection failed');
+          setGhError(error || 'GitHub connection failed');
           setGhLoading(false);
         }
       }
+
+      // Primary: listen for postMessage from callback page
+      function onMessage(event) {
+        if (event.origin !== window.location.origin) return;
+        if (event.data?.type !== 'github-oauth') return;
+        resolve(event.data.code, event.data.error);
+      }
       window.addEventListener('message', onMessage);
+
+      // Fallback: listen for localStorage change (if window.opener was severed)
+      function onStorage(event) {
+        if (event.key === 'github-oauth-code' && event.newValue) {
+          try { localStorage.removeItem('github-oauth-code'); } catch {}
+          resolve(event.newValue, null);
+        } else if (event.key === 'github-oauth-error' && event.newValue) {
+          try { localStorage.removeItem('github-oauth-error'); } catch {}
+          resolve(null, event.newValue);
+        }
+      }
+      window.addEventListener('storage', onStorage);
 
       // Also check if the popup was closed without completing
       const closedCheck = setInterval(() => {
         if (!popup || popup.closed) {
-          clearInterval(closedCheck);
-          window.removeEventListener('message', onMessage);
-          setGhLoading(false);
+          // Check localStorage one last time in case the storage event was missed
+          try {
+            const code = localStorage.getItem('github-oauth-code');
+            const error = localStorage.getItem('github-oauth-error');
+            localStorage.removeItem('github-oauth-code');
+            localStorage.removeItem('github-oauth-error');
+            if (code) { resolve(code, null); return; }
+            if (error) { resolve(null, error); return; }
+          } catch {}
+          resolve(null, null);
         }
-      }, 1000);
+      }, 500);
     } catch (err) {
       setGhError(err.response?.data?.error || 'Failed to start GitHub connection');
       setGhLoading(false);

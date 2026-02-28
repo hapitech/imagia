@@ -53,6 +53,8 @@ if (config.sentryDsn) {
 
 // Security
 app.use(helmet({
+  // Allow popups (GitHub OAuth) to keep window.opener after cross-origin navigation
+  crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
   contentSecurityPolicy: config.isProduction ? {
     directives: {
       defaultSrc: ["'self'"],

@@ -4,11 +4,13 @@ import { useSearchParams } from 'react-router-dom';
 /**
  * This page receives the GitHub OAuth callback redirect.
  * It extracts the authorization code from the URL and sends it
- * back to the opener window via postMessage, then closes itself.
+ * back to the opener window via postMessage (+ localStorage fallback),
+ * then closes itself.
  */
 export default function GitHubCallback() {
   const [searchParams] = useSearchParams();
   const [status, setStatus] = useState('processing');
+  const [showManualClose, setShowManualClose] = useState(false);
 
   useEffect(() => {
     const code = searchParams.get('code');
@@ -16,21 +18,34 @@ export default function GitHubCallback() {
 
     if (error) {
       setStatus('error');
-      // Try to notify parent
       if (window.opener) {
         window.opener.postMessage({ type: 'github-oauth', error }, window.location.origin);
       }
+      // localStorage fallback
+      try { localStorage.setItem('github-oauth-error', error); } catch {}
       return;
     }
 
     if (code) {
       setStatus('success');
-      // Send code back to the parent window
+      let sent = false;
+
+      // Primary: postMessage to parent
       if (window.opener) {
         window.opener.postMessage({ type: 'github-oauth', code }, window.location.origin);
-        // Close after a short delay to allow message delivery
-        setTimeout(() => window.close(), 500);
+        sent = true;
       }
+
+      // Fallback: localStorage (parent listens for storage event)
+      try { localStorage.setItem('github-oauth-code', code); } catch {}
+
+      // Auto-close after a longer delay to ensure message delivery
+      setTimeout(() => {
+        try { window.close(); } catch {}
+      }, 1500);
+
+      // Show manual close button after 2s in case auto-close fails
+      setTimeout(() => setShowManualClose(true), 2000);
     } else {
       setStatus('error');
     }
@@ -51,6 +66,14 @@ export default function GitHubCallback() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
             </svg>
             <p className="text-sm text-gray-600">GitHub connected! This window will close automatically.</p>
+            {showManualClose && (
+              <button
+                onClick={() => window.close()}
+                className="mt-4 rounded-md bg-gray-100 px-4 py-2 text-sm text-gray-700 hover:bg-gray-200"
+              >
+                Close this window
+              </button>
+            )}
           </>
         )}
         {status === 'error' && (
@@ -59,6 +82,12 @@ export default function GitHubCallback() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
             <p className="text-sm text-gray-600">GitHub connection failed. You can close this window.</p>
+            <button
+              onClick={() => window.close()}
+              className="mt-4 rounded-md bg-gray-100 px-4 py-2 text-sm text-gray-700 hover:bg-gray-200"
+            >
+              Close this window
+            </button>
           </>
         )}
       </div>
