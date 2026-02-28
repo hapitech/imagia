@@ -17,6 +17,10 @@ import {
   githubCreateRepo,
   githubConnect,
   getAvailableModels,
+  getProjectDomains,
+  addCustomDomain,
+  removeProjectDomain,
+  getDomainStatus,
 } from '../services/api';
 
 // ---------------------------------------------------------------------------
@@ -90,6 +94,87 @@ function detectLanguage(filePath) {
   };
   if (filePath.endsWith('Dockerfile')) return 'dockerfile';
   return map[ext] || null;
+}
+
+/** Format a date to a readable label for timeline grouping. */
+function fmtDateLabel(iso) {
+  if (!iso) return 'Unknown';
+  const d = new Date(iso);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const msgDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const diffDays = Math.round((today - msgDay) / (1000 * 60 * 60 * 24));
+
+  if (diffDays === 0) return 'Today';
+  if (diffDays === 1) return 'Yesterday';
+  if (diffDays < 7) return d.toLocaleDateString(undefined, { weekday: 'long' });
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: d.getFullYear() !== now.getFullYear() ? 'numeric' : undefined });
+}
+
+/** Summarize an assistant message into a short checkpoint label. */
+function summarizeMessage(content) {
+  if (!content) return 'AI response';
+  // Strip code blocks
+  const text = content.replace(/```[\s\S]*?```/g, '').trim();
+  // Take first sentence or first 80 chars
+  const firstSentence = text.split(/[.!?\n]/)[0]?.trim();
+  if (firstSentence && firstSentence.length <= 80) return firstSentence;
+  return text.substring(0, 80) + (text.length > 80 ? '...' : '');
+}
+
+/**
+ * Group messages into timeline sections.
+ * Recent messages (today) are shown individually.
+ * Older messages are grouped by date into collapsible checkpoints.
+ */
+function groupMessagesIntoTimeline(messages) {
+  if (!messages || messages.length === 0) return { recentMessages: [], checkpoints: [] };
+
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+  // Split into today vs older
+  const todayMessages = [];
+  const olderMessages = [];
+
+  for (const msg of messages) {
+    const msgDate = msg.created_at ? new Date(msg.created_at) : null;
+    // Treat messages with no date or temp IDs as recent (optimistic UI)
+    if (!msgDate || msgDate >= today || String(msg.id).startsWith('temp-')) {
+      todayMessages.push(msg);
+    } else {
+      olderMessages.push(msg);
+    }
+  }
+
+  // Group older messages by date
+  const checkpointMap = new Map();
+  for (const msg of olderMessages) {
+    const label = fmtDateLabel(msg.created_at);
+    if (!checkpointMap.has(label)) {
+      checkpointMap.set(label, { label, messages: [], firstTime: msg.created_at });
+    }
+    checkpointMap.get(label).messages.push(msg);
+  }
+
+  // Build checkpoint summaries
+  const checkpoints = [];
+  for (const [label, group] of checkpointMap) {
+    const userMsgCount = group.messages.filter((m) => m.role === 'user').length;
+    const assistantMsgs = group.messages.filter((m) => m.role === 'assistant' && !m.metadata?.error);
+    const lastAssistant = assistantMsgs[assistantMsgs.length - 1];
+    const summary = lastAssistant ? summarizeMessage(lastAssistant.content) : `${userMsgCount} message${userMsgCount !== 1 ? 's' : ''}`;
+
+    checkpoints.push({
+      label,
+      summary,
+      messages: group.messages,
+      messageCount: group.messages.length,
+      firstTime: group.firstTime,
+    });
+  }
+
+  return { recentMessages: todayMessages, checkpoints };
 }
 
 /** Parse message content and split into text and code blocks. */
@@ -181,6 +266,10 @@ export default function ProjectBuilder() {
   const [availableModels, setAvailableModels] = useState([]);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const messagesEndRef = useRef(null);
+  const messagesContainerRef = useRef(null);
+
+  // -- Timeline grouping for chat history ---
+  const timeline = useMemo(() => groupMessagesIntoTimeline(messages), [messages]);
 
   // -- Build state tracking ---
   const [isBuilding, setIsBuilding] = useState(false);
@@ -194,6 +283,7 @@ export default function ProjectBuilder() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [secrets, setSecrets] = useState([]);
   const [newSecret, setNewSecret] = useState({ key: '', value: '', type: 'api_key' });
+  const [domains, setDomains] = useState([]);
   const [collapsedFolders, setCollapsedFolders] = useState(new Set());
   const [chatWidth, setChatWidth] = useState(38); // percentage, default 38%
   const isDragging = useRef(false);
@@ -221,14 +311,16 @@ export default function ProjectBuilder() {
         const proj = await getProject(projectId);
         if (!cancelled) setProject(proj);
 
-        const [fileData, secretData] = await Promise.all([
+        const [fileData, secretData, domainData] = await Promise.all([
           getProjectFiles(projectId).catch(() => []),
           getProjectSecrets(projectId).catch(() => []),
+          getProjectDomains(projectId).catch(() => ({ domains: [] })),
         ]);
 
         if (!cancelled) {
           setFiles(Array.isArray(fileData) ? fileData : fileData.files || []);
           setSecrets(Array.isArray(secretData) ? secretData : secretData.secrets || []);
+          setDomains(domainData.domains || []);
         }
       } catch (err) {
         console.error('Failed to load project:', err);
@@ -285,8 +377,16 @@ export default function ProjectBuilder() {
   }, [progressMessage]);
 
   // ---- Auto-scroll messages --------------------------------------------------
+  const hasScrolledOnLoad = useRef(false);
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!messagesEndRef.current) return;
+    // On initial load, scroll instantly (no animation) so user sees latest message
+    if (!hasScrolledOnLoad.current && messages.length > 0) {
+      hasScrolledOnLoad.current = true;
+      messagesEndRef.current.scrollIntoView({ behavior: 'instant' });
+    } else {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [messages, detectedSecrets, isSending, progressMessage]);
 
   // ---- Initialize secret values when detected --------------------------------
@@ -356,6 +456,40 @@ export default function ProjectBuilder() {
       setSecrets((prev) => prev.filter((s) => s.id !== secretId));
     } catch (err) {
       console.error('Failed to delete secret:', err);
+    }
+  }
+
+  // -- Domain handlers --
+  async function handleAddDomain(domain) {
+    try {
+      const result = await addCustomDomain(projectId, domain);
+      const data = await getProjectDomains(projectId).catch(() => ({ domains: [] }));
+      setDomains(data.domains || []);
+      return result;
+    } catch (err) {
+      console.error('Failed to add domain:', err);
+      throw err;
+    }
+  }
+
+  async function handleRemoveDomain(domainId) {
+    try {
+      await removeProjectDomain(projectId, domainId);
+      setDomains((prev) => prev.filter((d) => d.id !== domainId));
+    } catch (err) {
+      console.error('Failed to remove domain:', err);
+    }
+  }
+
+  async function handleRefreshDomainStatus(domainId) {
+    try {
+      const status = await getDomainStatus(projectId, domainId);
+      setDomains((prev) => prev.map((d) =>
+        d.id === domainId ? { ...d, ssl_status: status.ssl_status, verified_at: status.verified ? new Date().toISOString() : d.verified_at } : d
+      ));
+      return status;
+    } catch (err) {
+      console.error('Failed to check domain status:', err);
     }
   }
 
@@ -442,6 +576,8 @@ export default function ProjectBuilder() {
     if (progress >= 100 || progress === -1) {
       setIsDeploying(false);
       getDeploymentStatus(projectId).then(setDeployStatus).catch(() => {});
+      // Refresh domains — a new subdomain may have been assigned
+      getProjectDomains(projectId).then((data) => setDomains(data.domains || [])).catch(() => {});
     }
   }, [progress, projectId]);
 
@@ -579,7 +715,20 @@ export default function ProjectBuilder() {
                   </div>
                 )}
                 <div className="space-y-4">
-                  {messages.map((msg, i) => (
+                  {/* Collapsed timeline checkpoints for older messages */}
+                  {timeline.checkpoints.map((cp) => (
+                    <TimelineCheckpoint key={cp.label} checkpoint={cp} />
+                  ))}
+                  {/* Today's divider if there are checkpoints */}
+                  {timeline.checkpoints.length > 0 && timeline.recentMessages.length > 0 && (
+                    <div className="flex items-center gap-3 py-1">
+                      <div className="flex-1 border-b border-gray-200" />
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">Today</span>
+                      <div className="flex-1 border-b border-gray-200" />
+                    </div>
+                  )}
+                  {/* Recent messages shown individually */}
+                  {timeline.recentMessages.map((msg, i) => (
                     <MessageBubble key={msg.id || i} message={msg} />
                   ))}
                   {detectedSecrets && detectedSecrets.length > 0 && (
@@ -656,10 +805,13 @@ export default function ProjectBuilder() {
           {mobilePanel === 'secrets' && (
             <SecretsTab secrets={secrets} newSecret={newSecret} onNewSecretChange={setNewSecret} onAddSecret={handleAddSecret} onDeleteSecret={handleDeleteSecret} />
           )}
+          {mobilePanel === 'domains' && (
+            <DomainsTab domains={domains} onAddDomain={handleAddDomain} onRemoveDomain={handleRemoveDomain} onRefreshStatus={handleRefreshDomainStatus} deploymentUrl={project?.deployment_url} />
+          )}
         </div>
 
         {/* Bottom tab bar */}
-        <MobileTabBar activePanel={mobilePanel} onPanelChange={setMobilePanel} fileCount={files.length} secretCount={secrets.length} />
+        <MobileTabBar activePanel={mobilePanel} onPanelChange={setMobilePanel} fileCount={files.length} secretCount={secrets.length} domainCount={domains.length} />
 
         {/* GitHub Modal */}
         {showGitHubModal && (
@@ -813,7 +965,20 @@ export default function ProjectBuilder() {
 
           {/* Message bubbles */}
           <div className="space-y-4">
-            {messages.map((msg, i) => (
+            {/* Collapsed timeline checkpoints for older messages */}
+            {timeline.checkpoints.map((cp) => (
+              <TimelineCheckpoint key={cp.label} checkpoint={cp} />
+            ))}
+            {/* Today's divider if there are checkpoints */}
+            {timeline.checkpoints.length > 0 && timeline.recentMessages.length > 0 && (
+              <div className="flex items-center gap-3 py-1">
+                <div className="flex-1 border-b border-gray-200" />
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">Today</span>
+                <div className="flex-1 border-b border-gray-200" />
+              </div>
+            )}
+            {/* Recent messages shown individually */}
+            {timeline.recentMessages.map((msg, i) => (
               <MessageBubble key={msg.id || i} message={msg} />
             ))}
 
@@ -969,6 +1134,7 @@ export default function ProjectBuilder() {
             { key: 'preview', label: 'Preview' },
             { key: 'files', label: 'Files' },
             { key: 'secrets', label: 'Secrets' },
+            { key: 'domains', label: 'Domains' },
           ].map(({ key, label }) => (
             <button
               key={key}
@@ -988,6 +1154,11 @@ export default function ProjectBuilder() {
               {key === 'secrets' && secrets.length > 0 && (
                 <span className="ml-1.5 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-gray-100 px-1.5 text-[10px] font-semibold text-gray-500">
                   {secrets.length}
+                </span>
+              )}
+              {key === 'domains' && domains.length > 0 && (
+                <span className="ml-1.5 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-gray-100 px-1.5 text-[10px] font-semibold text-gray-500">
+                  {domains.length}
                 </span>
               )}
               {activeTab === key && (
@@ -1016,6 +1187,15 @@ export default function ProjectBuilder() {
               onNewSecretChange={setNewSecret}
               onAddSecret={handleAddSecret}
               onDeleteSecret={handleDeleteSecret}
+            />
+          )}
+          {activeTab === 'domains' && (
+            <DomainsTab
+              domains={domains}
+              onAddDomain={handleAddDomain}
+              onRemoveDomain={handleRemoveDomain}
+              onRefreshStatus={handleRefreshDomainStatus}
+              deploymentUrl={project?.deployment_url}
             />
           )}
         </div>
@@ -1174,6 +1354,60 @@ function MessageBubble({ message }) {
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---------- Timeline Checkpoint (collapsible older messages) ------------------
+
+function TimelineCheckpoint({ checkpoint }) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div className="my-2">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="group flex w-full items-center gap-3 py-2"
+      >
+        {/* Timeline line + dot */}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <div className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-gray-300 bg-white group-hover:border-indigo-400 transition-colors">
+            <svg className={`h-3 w-3 text-gray-400 group-hover:text-indigo-500 transition-all ${expanded ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
+            </svg>
+          </div>
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 min-w-0 text-left">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-gray-500">{checkpoint.label}</span>
+            <span className="text-[10px] text-gray-400">
+              {checkpoint.messageCount} message{checkpoint.messageCount !== 1 ? 's' : ''}
+            </span>
+          </div>
+          <p className="truncate text-xs text-gray-400 mt-0.5">{checkpoint.summary}</p>
+        </div>
+
+        {/* Expand indicator */}
+        <span className="text-[10px] text-gray-400 flex-shrink-0 group-hover:text-indigo-500">
+          {expanded ? 'Collapse' : 'Expand'}
+        </span>
+      </button>
+
+      {/* Expanded messages */}
+      {expanded && (
+        <div className="ml-3 border-l-2 border-gray-200 pl-5 space-y-3 py-2">
+          {checkpoint.messages.map((msg, i) => (
+            <MessageBubble key={msg.id || i} message={msg} />
+          ))}
+        </div>
+      )}
+
+      {/* Divider line */}
+      {!expanded && (
+        <div className="mx-3 border-b border-dashed border-gray-200" />
+      )}
     </div>
   );
 }
@@ -1930,7 +2164,7 @@ function ModelSelector({ selectedModel, onSelectModel, isOpen, onToggle, compact
 
 // ---------- Mobile Tab Bar ----------------------------------------------------
 
-function MobileTabBar({ activePanel, onPanelChange, fileCount, secretCount }) {
+function MobileTabBar({ activePanel, onPanelChange, fileCount, secretCount, domainCount }) {
   const tabs = [
     {
       key: 'chat',
@@ -1968,6 +2202,16 @@ function MobileTabBar({ activePanel, onPanelChange, fileCount, secretCount }) {
       icon: (
         <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+        </svg>
+      ),
+    },
+    {
+      key: 'domains',
+      label: 'Domains',
+      badge: domainCount || 0,
+      icon: (
+        <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
         </svg>
       ),
     },
@@ -2172,6 +2416,188 @@ function SecretsTab({ secrets, newSecret, onNewSecretChange, onAddSecret, onDele
             className="w-full rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition-all hover:bg-indigo-700 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-40"
           >
             Add Secret
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ---------- Domains Tab --------------------------------------------------------
+
+function DomainsTab({ domains, onAddDomain, onRemoveDomain, onRefreshStatus, deploymentUrl }) {
+  const [newDomain, setNewDomain] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [error, setError] = useState('');
+  const [instructions, setInstructions] = useState(null);
+  const [checkingId, setCheckingId] = useState(null);
+
+  async function handleAdd(e) {
+    e.preventDefault();
+    const domain = newDomain.trim().toLowerCase();
+    if (!domain) return;
+    setAdding(true);
+    setError('');
+    setInstructions(null);
+    try {
+      const result = await onAddDomain(domain);
+      setNewDomain('');
+      if (result?.instructions) setInstructions(result.instructions);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Failed to add domain');
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  async function handleCheckStatus(domainId) {
+    setCheckingId(domainId);
+    try {
+      await onRefreshStatus(domainId);
+    } finally {
+      setCheckingId(null);
+    }
+  }
+
+  const subdomains = domains.filter((d) => d.domain_type === 'subdomain');
+  const customDomains = domains.filter((d) => d.domain_type === 'custom');
+
+  return (
+    <div className="h-full overflow-y-auto p-5">
+      {/* Header */}
+      <div className="mb-4 flex items-center gap-2">
+        <svg className="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+        </svg>
+        <h3 className="text-sm font-semibold text-gray-900">Domains</h3>
+      </div>
+
+      {/* Auto-assigned subdomain */}
+      {subdomains.length > 0 && (
+        <div className="mb-5">
+          <h4 className="mb-2 text-xs font-medium text-gray-500 uppercase tracking-wide">Auto-assigned</h4>
+          {subdomains.map((d) => (
+            <div key={d.id} className="flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3">
+              <div className="flex items-center gap-3">
+                <div className="flex h-8 w-8 items-center justify-center rounded-md bg-emerald-100">
+                  <svg className="h-4 w-4 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                </div>
+                <div>
+                  <a href={`https://${d.domain}`} target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-emerald-800 hover:underline">
+                    {d.domain}
+                  </a>
+                  <p className="text-[10px] text-emerald-600">SSL active</p>
+                </div>
+              </div>
+              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">Primary</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* No domains yet */}
+      {domains.length === 0 && !deploymentUrl && (
+        <div className="mb-6 rounded-lg border border-dashed border-gray-200 p-6 text-center">
+          <svg className="mx-auto mb-2 h-6 w-6 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3" />
+          </svg>
+          <p className="text-xs text-gray-400">Deploy your app to get an automatic subdomain</p>
+        </div>
+      )}
+
+      {/* Custom domains */}
+      {customDomains.length > 0 && (
+        <div className="mb-5">
+          <h4 className="mb-2 text-xs font-medium text-gray-500 uppercase tracking-wide">Custom domains</h4>
+          <ul className="space-y-2">
+            {customDomains.map((d) => (
+              <li key={d.id} className="group flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3 transition-colors hover:border-gray-300">
+                <div className="flex items-center gap-3">
+                  <div className={`flex h-8 w-8 items-center justify-center rounded-md ${d.ssl_status === 'active' ? 'bg-emerald-100' : 'bg-amber-100'}`}>
+                    {d.ssl_status === 'active' ? (
+                      <svg className="h-4 w-4 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                    ) : (
+                      <svg className="h-4 w-4 text-amber-600 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6l4 2" />
+                      </svg>
+                    )}
+                  </div>
+                  <div>
+                    <a href={`https://${d.domain}`} target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-gray-800 hover:underline">
+                      {d.domain}
+                    </a>
+                    <p className={`text-[10px] ${d.ssl_status === 'active' ? 'text-emerald-600' : 'text-amber-600'}`}>
+                      SSL {d.ssl_status}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => handleCheckStatus(d.id)}
+                    disabled={checkingId === d.id}
+                    className="rounded-md p-1.5 text-gray-300 transition-all hover:bg-gray-100 hover:text-gray-600"
+                    title="Check SSL status"
+                  >
+                    <svg className={`h-4 w-4 ${checkingId === d.id ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={() => onRemoveDomain(d.id)}
+                    className="rounded-md p-1.5 text-gray-300 opacity-0 transition-all hover:bg-red-50 hover:text-red-500 group-hover:opacity-100"
+                    title="Remove domain"
+                  >
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* CNAME instructions banner */}
+      {instructions && (
+        <div className="mb-5 rounded-lg bg-blue-50 p-3">
+          <p className="mb-1 text-xs font-medium text-blue-800">{instructions.message}</p>
+          <div className="rounded bg-blue-100 px-3 py-2 font-mono text-xs text-blue-700">
+            {instructions.record_type} {instructions.record_name} &rarr; {instructions.record_value}
+          </div>
+          <button onClick={() => setInstructions(null)} className="mt-2 text-[10px] text-blue-600 hover:underline">Dismiss</button>
+        </div>
+      )}
+
+      {/* Error */}
+      {error && (
+        <div className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">{error}</div>
+      )}
+
+      {/* Add custom domain form */}
+      <form onSubmit={handleAdd} className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+        <h4 className="mb-3 text-xs font-semibold text-gray-700">Add a custom domain</h4>
+        <div className="space-y-2.5">
+          <input
+            type="text"
+            placeholder="app.yourdomain.com"
+            value={newDomain}
+            onChange={(e) => setNewDomain(e.target.value)}
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm placeholder-gray-400 transition-colors focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+          />
+          <p className="text-[10px] text-gray-400">
+            After adding, point a CNAME record from your domain to <span className="font-medium">imagia.net</span>
+          </p>
+          <button
+            type="submit"
+            disabled={!newDomain.trim() || adding}
+            className="w-full rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition-all hover:bg-indigo-700 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {adding ? 'Adding...' : 'Add Domain'}
           </button>
         </div>
       </form>
