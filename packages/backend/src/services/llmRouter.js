@@ -1,57 +1,75 @@
 const claudeService = require('./claudeService');
 const fireworksService = require('./fireworksService');
 const openaiService = require('./openaiService');
+const config = require('../config/environment');
 const logger = require('../config/logger');
 
 /**
  * Routing table mapping task types to primary and fallback LLM providers.
+ *
+ * Default code model: Qwen3 Coder 480B via Fireworks ($0.45/$1.80 per 1M tokens)
+ * This replaces Anthropic as primary to avoid failures when ANTHROPIC_API_KEY is missing.
  */
 const ROUTING_TABLE = {
   'code-generation': {
-    primary: 'anthropic',
-    model: 'claude-sonnet-4-6',
+    primary: 'fireworks',
+    model: 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct',
     fallback: 'openai',
   },
   'code-iteration': {
-    primary: 'anthropic',
-    model: 'claude-sonnet-4-6',
+    primary: 'fireworks',
+    model: 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct',
     fallback: 'openai',
   },
   'scaffold': {
-    primary: 'anthropic',
-    model: 'claude-sonnet-4-6',
-    fallback: 'fireworks',
+    primary: 'fireworks',
+    model: 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct',
+    fallback: 'openai',
   },
   'config-files': {
-    primary: 'anthropic',
-    model: 'claude-sonnet-4-6',
-    fallback: 'fireworks',
+    primary: 'fireworks',
+    model: 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct',
+    fallback: 'openai',
   },
   'landing-page': {
     primary: 'openai',
     model: 'gpt-4o',
-    fallback: 'anthropic',
+    fallback: 'fireworks',
   },
   'social-copy': {
     primary: 'openai',
     model: 'gpt-4o',
-    fallback: 'anthropic',
+    fallback: 'fireworks',
   },
   'ad-copy': {
     primary: 'openai',
     model: 'gpt-4o',
-    fallback: 'anthropic',
+    fallback: 'fireworks',
   },
   'email-template': {
     primary: 'openai',
     model: 'gpt-4o',
-    fallback: 'anthropic',
+    fallback: 'fireworks',
   },
   'demo-script': {
-    primary: 'anthropic',
-    model: 'claude-sonnet-4-6',
+    primary: 'fireworks',
+    model: 'accounts/fireworks/models/deepseek-v3',
     fallback: 'openai',
   },
+};
+
+/**
+ * Maps model IDs to their provider name for model override routing.
+ */
+const MODEL_TO_PROVIDER = {
+  'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct': 'fireworks',
+  'accounts/fireworks/models/deepseek-v3': 'fireworks',
+  'accounts/fireworks/models/llama-v3p3-70b-instruct': 'fireworks',
+  'accounts/fireworks/models/mixtral-8x7b-instruct': 'fireworks',
+  'accounts/fireworks/models/qwen2p5-coder-32b-instruct': 'fireworks',
+  'gpt-4o': 'openai',
+  'claude-sonnet-4-6': 'anthropic',
+  'claude-sonnet-4-20250514': 'anthropic',
 };
 
 class LLMRouter {
@@ -64,6 +82,7 @@ class LLMRouter {
 
     logger.info('LLMRouter initialized', {
       taskTypes: Object.keys(ROUTING_TABLE),
+      hasAnthropicKey: !!config.anthropicApiKey,
     });
   }
 
@@ -73,24 +92,32 @@ class LLMRouter {
    *
    * @param {string} taskType - The type of task (e.g. 'code-generation')
    * @param {Object} options - Generation options (systemMessage, prompt, etc.)
+   * @param {string} [options.modelOverride] - Explicit model ID from user selection (bypasses routing table)
    * @returns {Promise<{content: string, usage: Object, model: string, provider: string, fallbackUsed: boolean}>}
    */
   async route(taskType, options) {
+    const { modelOverride, ...genOptions } = options;
+
+    // If user selected a specific model, use it directly
+    if (modelOverride && modelOverride !== 'auto') {
+      return this._routeWithModelOverride(modelOverride, genOptions);
+    }
+
     const route = ROUTING_TABLE[taskType];
 
     if (!route) {
-      logger.warn('Unknown task type, defaulting to anthropic', { taskType });
-      return this._generateWithProvider('anthropic', {
-        ...options,
-        model: options.model || 'claude-sonnet-4-6',
+      logger.warn('Unknown task type, defaulting to fireworks', { taskType });
+      return this._generateWithProvider('fireworks', {
+        ...genOptions,
+        model: genOptions.model || 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct',
       });
     }
 
     // Try primary provider
     try {
       const result = await this._generateWithProvider(route.primary, {
-        ...options,
-        model: options.model || route.model,
+        ...genOptions,
+        model: genOptions.model || route.model,
       });
 
       return {
@@ -114,7 +141,7 @@ class LLMRouter {
         }
 
         // Let the fallback use its own default model
-        const fallbackOptions = { ...options };
+        const fallbackOptions = { ...genOptions };
         delete fallbackOptions.model;
 
         const result = await fallbackProvider.generate(fallbackOptions);
@@ -140,6 +167,41 @@ class LLMRouter {
         );
       }
     }
+  }
+
+  /**
+   * Route directly to a specific model selected by the user.
+   * @private
+   */
+  async _routeWithModelOverride(modelId, options) {
+    const providerName = MODEL_TO_PROVIDER[modelId];
+
+    if (!providerName) {
+      // Try to infer provider from model ID
+      if (modelId.startsWith('accounts/fireworks/')) {
+        return this._generateWithProvider('fireworks', { ...options, model: modelId });
+      }
+      if (modelId.startsWith('claude-')) {
+        return this._generateWithProvider('anthropic', { ...options, model: modelId });
+      }
+      if (modelId.startsWith('gpt-')) {
+        return this._generateWithProvider('openai', { ...options, model: modelId });
+      }
+
+      logger.warn('Unknown model override, using fireworks default', { modelId });
+      return this._generateWithProvider('fireworks', options);
+    }
+
+    const result = await this._generateWithProvider(providerName, {
+      ...options,
+      model: modelId,
+    });
+
+    return {
+      ...result,
+      provider: providerName,
+      fallbackUsed: false,
+    };
   }
 
   /**

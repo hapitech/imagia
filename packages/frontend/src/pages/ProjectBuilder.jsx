@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import useProgress from '../hooks/useProgress';
 import useChat from '../hooks/useChat';
+import useIsMobile from '../hooks/useIsMobile';
 import {
   getProject,
   getProjectFiles,
@@ -15,6 +16,7 @@ import {
   githubSyncStatus,
   githubCreateRepo,
   githubConnect,
+  getAvailableModels,
 } from '../services/api';
 
 // ---------------------------------------------------------------------------
@@ -175,6 +177,9 @@ export default function ProjectBuilder() {
   // -- Chat input ---
   const [prompt, setPrompt] = useState('');
   const [secretValues, setSecretValues] = useState({});
+  const [selectedModel, setSelectedModel] = useState('auto');
+  const [availableModels, setAvailableModels] = useState([]);
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const messagesEndRef = useRef(null);
 
   // -- Build state tracking ---
@@ -190,6 +195,9 @@ export default function ProjectBuilder() {
   const [secrets, setSecrets] = useState([]);
   const [newSecret, setNewSecret] = useState({ key: '', value: '', type: 'api_key' });
   const [collapsedFolders, setCollapsedFolders] = useState(new Set());
+  const [chatWidth, setChatWidth] = useState(38); // percentage, default 38%
+  const isDragging = useRef(false);
+  const containerRef = useRef(null);
 
   // -- Deploy + GitHub state ---
   const [isDeploying, setIsDeploying] = useState(false);
@@ -198,6 +206,9 @@ export default function ProjectBuilder() {
   const [showGitHubModal, setShowGitHubModal] = useState(false);
   const [gitRepoName, setGitRepoName] = useState('');
   const [gitIsPrivate, setGitIsPrivate] = useState(false);
+  const [mobilePanel, setMobilePanel] = useState('chat');
+  const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
+  const isMobile = useIsMobile();
 
   // ---- Load project on mount ------------------------------------------------
   useEffect(() => {
@@ -229,6 +240,16 @@ export default function ProjectBuilder() {
     load();
     return () => { cancelled = true; };
   }, [projectId]);
+
+  // ---- Load available models -------------------------------------------------
+  useEffect(() => {
+    getAvailableModels()
+      .then((data) => {
+        const models = data?.models?.code || [];
+        setAvailableModels(models);
+      })
+      .catch(() => {});
+  }, []);
 
   // ---- Track build progress -------------------------------------------------
   useEffect(() => {
@@ -286,7 +307,7 @@ export default function ProjectBuilder() {
     if (!prompt.trim() || isSending || isBuilding) return;
     const content = prompt;
     setPrompt('');
-    await sendMessage(content);
+    await sendMessage(content, null, selectedModel);
   }
 
   function handleKeyDown(e) {
@@ -433,6 +454,30 @@ export default function ProjectBuilder() {
     });
   }, []);
 
+  // Drag-to-resize handler for chat/preview split
+  const handleDragStart = useCallback((e) => {
+    e.preventDefault();
+    isDragging.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const onMove = (moveEvent) => {
+      if (!isDragging.current || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const pct = ((moveEvent.clientX - rect.left) / rect.width) * 100;
+      setChatWidth(Math.min(70, Math.max(20, pct)));
+    };
+    const onUp = () => {
+      isDragging.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, []);
+
   const hasMessages = messages.length > 0;
   const placeholder = hasMessages
     ? 'Tell me what to change...'
@@ -451,14 +496,188 @@ export default function ProjectBuilder() {
   }
 
   // ==========================================================================
-  // Render
+  // Mobile Render
+  // ==========================================================================
+  if (isMobile) {
+    return (
+      <div className="flex flex-col bg-white" style={{ height: '100dvh' }}>
+        {/* Mobile header */}
+        <div className="flex-shrink-0 border-b border-gray-200 bg-white">
+          <div className="flex items-center gap-2 px-3 py-2.5">
+            <Link to="/" className="flex-shrink-0 rounded p-1.5 text-gray-400 hover:text-gray-600">
+              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+            </Link>
+            <div className="min-w-0 flex-1">
+              <h2 className="truncate text-sm font-semibold text-gray-900">{project?.name || 'Project'}</h2>
+            </div>
+            {isConnected && <span className="h-2 w-2 flex-shrink-0 rounded-full bg-green-500" title="Live" />}
+            <button
+              onClick={() => setMobileActionsOpen(!mobileActionsOpen)}
+              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100"
+            >
+              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01" />
+              </svg>
+            </button>
+            <button
+              onClick={handleDeploy}
+              disabled={isDeploying || isBuilding || files.length === 0}
+              className="flex-shrink-0 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-medium text-white disabled:opacity-40"
+            >
+              {isDeploying ? 'Deploying...' : 'Deploy'}
+            </button>
+          </div>
+          {mobileActionsOpen && (
+            <div className="flex gap-2 overflow-x-auto border-t border-gray-100 px-3 py-2">
+              {project?.github_repo_url ? (
+                <>
+                  <button onClick={handleGitHubPush} className="flex-shrink-0 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600">Push</button>
+                  <button onClick={handleGitHubPull} className="flex-shrink-0 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600">Pull</button>
+                </>
+              ) : (
+                <button onClick={() => setShowGitHubModal(true)} className="flex-shrink-0 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600">GitHub</button>
+              )}
+              {project?.deployment_url && (
+                <Link to={`/project/${projectId}/marketing`} className="flex-shrink-0 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600">Marketing</Link>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Build progress */}
+        <BuildProgressBar
+          isBuilding={isBuilding}
+          buildSuccess={buildSuccess}
+          buildError={buildError}
+          progress={progress}
+          stage={stage}
+          progressMessage={progressMessage || latestProgressMessage.current}
+        />
+
+        {/* Active panel */}
+        <div className="flex-1 overflow-hidden">
+          {mobilePanel === 'chat' && (
+            <div className="flex h-full flex-col">
+              {/* Messages */}
+              <div className="flex-1 overflow-y-auto px-4 py-4">
+                {messages.length === 0 && !detectedSecrets && (
+                  <div className="flex h-full flex-col items-center justify-center">
+                    <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-indigo-50">
+                      <svg className="h-7 w-7 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5" />
+                      </svg>
+                    </div>
+                    <h3 className="mb-2 text-base font-semibold text-gray-800">What would you like to build?</h3>
+                    <p className="max-w-xs text-center text-sm text-gray-400">Describe your app idea and the AI will generate the code.</p>
+                    <div className="mt-5 flex flex-wrap justify-center gap-2">
+                      {['A task tracker app', 'A landing page', 'A REST API'].map((s) => (
+                        <button key={s} onClick={() => setPrompt(s)} className="rounded-full border border-gray-200 px-4 py-2.5 text-xs text-gray-500 hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-600">{s}</button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="space-y-4">
+                  {messages.map((msg, i) => (
+                    <MessageBubble key={msg.id || i} message={msg} />
+                  ))}
+                  {detectedSecrets && detectedSecrets.length > 0 && (
+                    <SecretsDetectionCard detectedSecrets={detectedSecrets} secretValues={secretValues} onSecretChange={setSecretValues} onSubmit={handleSubmitSecrets} onDismiss={dismissSecrets} isSaving={isSending} />
+                  )}
+                  {(isSending || isBuilding) && !detectedSecrets && (
+                    <div className="flex justify-start">
+                      <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-gray-100 px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <svg className="h-4 w-4 animate-spin text-indigo-500" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                          </svg>
+                          <span className="text-sm text-gray-600">{progressMessage || (isSending ? 'Processing...' : 'Working...')}</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <div ref={messagesEndRef} />
+              </div>
+
+              {/* Chat input */}
+              <form onSubmit={handleSend} className="flex-shrink-0 border-t border-gray-200 bg-white px-3 py-3">
+                {pendingAttachments.length > 0 && (
+                  <div className="mb-2 flex flex-wrap gap-2">
+                    {pendingAttachments.map((file, idx) => (
+                      <AttachmentPreview key={`${file.name}-${idx}`} file={file} onRemove={() => removeAttachment(idx)} />
+                    ))}
+                  </div>
+                )}
+                <div className="mb-2">
+                  <ModelSelector
+                    selectedModel={selectedModel}
+                    onSelectModel={setSelectedModel}
+                    isOpen={modelDropdownOpen}
+                    onToggle={() => setModelDropdownOpen(!modelDropdownOpen)}
+                    compact
+                  />
+                </div>
+                <div className="flex items-end gap-2">
+                  <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isBuilding} className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl border border-gray-200 bg-gray-50 text-gray-400 disabled:opacity-40">
+                    <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
+                    </svg>
+                  </button>
+                  <input ref={fileInputRef} type="file" multiple accept="image/*,audio/*,video/*" onChange={handleFileSelect} className="hidden" />
+                  <div className="relative flex-1">
+                    <textarea
+                      value={prompt}
+                      onChange={(e) => setPrompt(e.target.value)}
+                      onKeyDown={handleKeyDown}
+                      placeholder={placeholder}
+                      rows={1}
+                      disabled={isBuilding}
+                      className="w-full resize-none rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm leading-relaxed text-gray-800 placeholder-gray-400 focus:border-indigo-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-100 disabled:opacity-50"
+                      style={{ minHeight: '44px', maxHeight: '120px' }}
+                      onInput={(e) => { e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'; }}
+                    />
+                  </div>
+                  <button type="submit" disabled={!prompt.trim() || isSending || isBuilding} className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-white disabled:opacity-40">
+                    <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+                    </svg>
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+          {mobilePanel === 'preview' && <PreviewTab project={project} files={files} />}
+          {mobilePanel === 'files' && (
+            <FilesTab files={files} selectedFile={selectedFile} onSelectFile={setSelectedFile} collapsedFolders={collapsedFolders} onToggleFolder={toggleFolder} mobileMode />
+          )}
+          {mobilePanel === 'secrets' && (
+            <SecretsTab secrets={secrets} newSecret={newSecret} onNewSecretChange={setNewSecret} onAddSecret={handleAddSecret} onDeleteSecret={handleDeleteSecret} />
+          )}
+        </div>
+
+        {/* Bottom tab bar */}
+        <MobileTabBar activePanel={mobilePanel} onPanelChange={setMobilePanel} fileCount={files.length} secretCount={secrets.length} />
+
+        {/* GitHub Modal */}
+        {showGitHubModal && (
+          <GitHubModal onClose={() => setShowGitHubModal(false)} onCreateRepo={handleCreateRepo} onConnectGitHub={handleConnectGitHub} repoName={gitRepoName} onRepoNameChange={setGitRepoName} isPrivate={gitIsPrivate} onPrivateChange={setGitIsPrivate} projectName={project?.name} />
+        )}
+      </div>
+    );
+  }
+
+  // ==========================================================================
+  // Desktop Render
   // ==========================================================================
   return (
-    <div className="flex h-[calc(100vh-4rem)] gap-0 bg-gray-50">
+    <div ref={containerRef} className="flex h-[calc(100vh-4rem)] gap-0 bg-gray-50">
       {/* ================================================================== */}
-      {/* LEFT PANEL -- Chat (60%) */}
+      {/* LEFT PANEL -- Chat */}
       {/* ================================================================== */}
-      <div className="flex w-[60%] flex-col border-r border-gray-200 bg-white">
+      <div style={{ width: `${chatWidth}%` }} className="flex flex-shrink-0 flex-col border-r border-gray-200 bg-white">
         {/* -- Header -- */}
         <div className="flex items-center justify-between border-b border-gray-200 px-6 py-3.5">
           <div className="min-w-0">
@@ -656,6 +875,16 @@ export default function ProjectBuilder() {
             </div>
           )}
 
+          {/* Model selector */}
+          <div className="mb-2">
+            <ModelSelector
+              selectedModel={selectedModel}
+              onSelectModel={setSelectedModel}
+              isOpen={modelDropdownOpen}
+              onToggle={() => setModelDropdownOpen(!modelDropdownOpen)}
+            />
+          </div>
+
           <div className="flex items-end gap-3">
             {/* Attach button */}
             <button
@@ -720,9 +949,20 @@ export default function ProjectBuilder() {
       </div>
 
       {/* ================================================================== */}
-      {/* RIGHT PANEL (40%) */}
+      {/* DRAG HANDLE */}
       {/* ================================================================== */}
-      <div className="flex w-[40%] flex-col bg-white">
+      <div
+        onMouseDown={handleDragStart}
+        className="group relative z-10 flex w-1.5 flex-shrink-0 cursor-col-resize items-center justify-center hover:bg-indigo-50 active:bg-indigo-100"
+        title="Drag to resize"
+      >
+        <div className="h-8 w-0.5 rounded-full bg-gray-300 transition-colors group-hover:bg-indigo-400 group-active:bg-indigo-500" />
+      </div>
+
+      {/* ================================================================== */}
+      {/* RIGHT PANEL */}
+      {/* ================================================================== */}
+      <div className="flex min-w-0 flex-1 flex-col bg-white">
         {/* -- Tab bar -- */}
         <div className="flex border-b border-gray-200">
           {[
@@ -1436,83 +1676,111 @@ function PreviewTab({ project, files }) {
 
 // ---------- Files Tab ---------------------------------------------------------
 
-function FilesTab({ files, selectedFile, onSelectFile, collapsedFolders, onToggleFolder }) {
+function FilesTab({ files, selectedFile, onSelectFile, collapsedFolders, onToggleFolder, mobileMode }) {
   const fileList = Array.isArray(files) ? files : [];
   const tree = useMemo(() => buildFileTree(fileList), [fileList]);
+  const [showTree, setShowTree] = useState(true);
 
+  const handleSelectFile = (file) => {
+    onSelectFile(file);
+    if (mobileMode) setShowTree(false);
+  };
+
+  // Code viewer (shared between mobile and desktop)
+  const codeViewer = selectedFile ? (
+    <>
+      <div className="flex items-center gap-2 border-b border-gray-200 bg-gray-50 px-4 py-2.5">
+        {mobileMode && (
+          <button onClick={() => { setShowTree(true); onSelectFile(null); }} className="mr-1 flex-shrink-0 rounded p-1 text-gray-400 hover:text-gray-600">
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+          </button>
+        )}
+        <span className="truncate text-xs font-medium text-gray-600">
+          {selectedFile.file_path || selectedFile.path}
+        </span>
+        {(() => {
+          const lang = selectedFile.language || detectLanguage(selectedFile.file_path || selectedFile.path);
+          if (!lang) return null;
+          const colorClass = LANG_COLORS[lang] || 'bg-gray-200 text-gray-600';
+          return (
+            <span className={`ml-auto flex-shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${colorClass}`}>
+              {lang}
+            </span>
+          );
+        })()}
+      </div>
+      <div className="flex-1 overflow-auto bg-gray-950 p-4">
+        <pre className="text-xs leading-relaxed text-gray-100">
+          <code>{selectedFile.content || '// No content available'}</code>
+        </pre>
+      </div>
+    </>
+  ) : (
+    <div className="flex h-full flex-col items-center justify-center text-center">
+      <svg className="mb-3 h-8 w-8 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+      </svg>
+      <p className="text-xs text-gray-400">Select a file to view its contents</p>
+    </div>
+  );
+
+  const fileTree = fileList.length === 0 ? (
+    <div className="px-4 py-8 text-center">
+      <svg className="mx-auto mb-2 h-6 w-6 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+      </svg>
+      <p className="text-xs text-gray-400">No files generated yet</p>
+    </div>
+  ) : (
+    <div className="pb-4">
+      <FileTreeNode
+        node={tree}
+        path=""
+        selectedPath={selectedFile?.file_path || selectedFile?.path}
+        onSelectFile={handleSelectFile}
+        collapsedFolders={collapsedFolders}
+        onToggleFolder={onToggleFolder}
+        isRoot
+      />
+    </div>
+  );
+
+  // Mobile: stacked vertical layout
+  if (mobileMode) {
+    return (
+      <div className="flex h-full flex-col">
+        {showTree || !selectedFile ? (
+          <div className="flex-1 overflow-y-auto bg-gray-50/50">
+            <div className="flex items-center justify-between px-4 py-3">
+              <span className="text-[10px] font-semibold uppercase tracking-widest text-gray-400">Files</span>
+              {fileList.length > 0 && (
+                <span className="rounded-full bg-gray-200 px-2 py-0.5 text-[10px] font-medium text-gray-500">{fileList.length}</span>
+              )}
+            </div>
+            {fileTree}
+          </div>
+        ) : (
+          <div className="flex flex-1 flex-col overflow-hidden">{codeViewer}</div>
+        )}
+      </div>
+    );
+  }
+
+  // Desktop: side-by-side
   return (
     <div className="flex h-full">
-      {/* File tree sidebar */}
       <div className="w-56 flex-shrink-0 overflow-y-auto border-r border-gray-200 bg-gray-50/50">
         <div className="flex items-center justify-between px-4 py-3">
-          <span className="text-[10px] font-semibold uppercase tracking-widest text-gray-400">
-            Files
-          </span>
+          <span className="text-[10px] font-semibold uppercase tracking-widest text-gray-400">Files</span>
           {fileList.length > 0 && (
-            <span className="rounded-full bg-gray-200 px-2 py-0.5 text-[10px] font-medium text-gray-500">
-              {fileList.length}
-            </span>
+            <span className="rounded-full bg-gray-200 px-2 py-0.5 text-[10px] font-medium text-gray-500">{fileList.length}</span>
           )}
         </div>
-
-        {fileList.length === 0 ? (
-          <div className="px-4 py-8 text-center">
-            <svg className="mx-auto mb-2 h-6 w-6 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
-            </svg>
-            <p className="text-xs text-gray-400">No files generated yet</p>
-          </div>
-        ) : (
-          <div className="pb-4">
-            <FileTreeNode
-              node={tree}
-              path=""
-              selectedPath={selectedFile?.file_path || selectedFile?.path}
-              onSelectFile={onSelectFile}
-              collapsedFolders={collapsedFolders}
-              onToggleFolder={onToggleFolder}
-              isRoot
-            />
-          </div>
-        )}
+        {fileTree}
       </div>
-
-      {/* Code viewer */}
-      <div className="flex flex-1 flex-col overflow-hidden">
-        {selectedFile ? (
-          <>
-            {/* File header */}
-            <div className="flex items-center gap-2 border-b border-gray-200 bg-gray-50 px-4 py-2.5">
-              <span className="truncate text-xs font-medium text-gray-600">
-                {selectedFile.file_path || selectedFile.path}
-              </span>
-              {(() => {
-                const lang = selectedFile.language || detectLanguage(selectedFile.file_path || selectedFile.path);
-                if (!lang) return null;
-                const colorClass = LANG_COLORS[lang] || 'bg-gray-200 text-gray-600';
-                return (
-                  <span className={`ml-auto flex-shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${colorClass}`}>
-                    {lang}
-                  </span>
-                );
-              })()}
-            </div>
-            {/* Code content */}
-            <div className="flex-1 overflow-auto bg-gray-950 p-4">
-              <pre className="text-xs leading-relaxed text-gray-100">
-                <code>{selectedFile.content || '// No content available'}</code>
-              </pre>
-            </div>
-          </>
-        ) : (
-          <div className="flex h-full flex-col items-center justify-center text-center">
-            <svg className="mb-3 h-8 w-8 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
-            </svg>
-            <p className="text-xs text-gray-400">Select a file to view its contents</p>
-          </div>
-        )}
-      </div>
+      <div className="flex flex-1 flex-col overflow-hidden">{codeViewer}</div>
     </div>
   );
 }
@@ -1592,6 +1860,141 @@ function FileTreeNode({ node, path, selectedPath, onSelectFile, collapsedFolders
         );
       })}
     </div>
+  );
+}
+
+// ---------- Model Selector Dropdown -------------------------------------------
+
+const MODEL_OPTIONS = [
+  { id: 'auto', label: 'Auto', desc: 'Smart routing', icon: '⚡' },
+  { id: 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct', label: 'Qwen3 Coder', desc: 'Best for code', icon: '🔧' },
+  { id: 'accounts/fireworks/models/deepseek-v3', label: 'DeepSeek V3', desc: 'Reasoning', icon: '🧠' },
+  { id: 'gpt-4o', label: 'GPT-4o', desc: 'Content', icon: '📝' },
+  { id: 'claude-sonnet-4-6', label: 'Claude Sonnet', desc: 'Premium code', icon: '💎' },
+  { id: 'accounts/fireworks/models/flux-1-dev-fp8', label: 'FLUX.1', desc: 'Image gen', icon: '🎨' },
+  { id: 'accounts/fireworks/models/llama-v3p3-70b-instruct', label: 'Llama 3.3', desc: 'Budget', icon: '🦙' },
+];
+
+function ModelSelector({ selectedModel, onSelectModel, isOpen, onToggle, compact }) {
+  const selected = MODEL_OPTIONS.find((m) => m.id === selectedModel) || MODEL_OPTIONS[0];
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={onToggle}
+        className={`flex items-center gap-1.5 rounded-lg border border-gray-200 bg-gray-50 text-xs font-medium text-gray-600 transition-colors hover:border-gray-300 hover:bg-gray-100 ${compact ? 'px-2 py-1.5' : 'px-2.5 py-2'}`}
+        title={`Model: ${selected.label} — ${selected.desc}`}
+      >
+        <span>{selected.icon}</span>
+        <span className={compact ? 'max-w-[60px] truncate' : ''}>{selected.label}</span>
+        <svg className="h-3 w-3 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {isOpen && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={onToggle} />
+          <div className="absolute bottom-full left-0 z-50 mb-1 w-56 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-lg">
+            <div className="px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+              Select Model
+            </div>
+            {MODEL_OPTIONS.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => { onSelectModel(m.id); onToggle(); }}
+                className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors hover:bg-gray-50 ${
+                  selectedModel === m.id ? 'bg-indigo-50 text-indigo-700' : 'text-gray-700'
+                }`}
+              >
+                <span className="text-base">{m.icon}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium">{m.label}</div>
+                  <div className="text-[10px] text-gray-400">{m.desc}</div>
+                </div>
+                {selectedModel === m.id && (
+                  <svg className="h-4 w-4 flex-shrink-0 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                )}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---------- Mobile Tab Bar ----------------------------------------------------
+
+function MobileTabBar({ activePanel, onPanelChange, fileCount, secretCount }) {
+  const tabs = [
+    {
+      key: 'chat',
+      label: 'Chat',
+      icon: (
+        <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+        </svg>
+      ),
+    },
+    {
+      key: 'preview',
+      label: 'Preview',
+      icon: (
+        <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+        </svg>
+      ),
+    },
+    {
+      key: 'files',
+      label: 'Files',
+      badge: fileCount || 0,
+      icon: (
+        <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+        </svg>
+      ),
+    },
+    {
+      key: 'secrets',
+      label: 'Secrets',
+      badge: secretCount || 0,
+      icon: (
+        <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+        </svg>
+      ),
+    },
+  ];
+
+  return (
+    <nav className="flex flex-shrink-0 border-t border-gray-200 bg-white pb-safe">
+      {tabs.map(({ key, label, icon, badge }) => (
+        <button
+          key={key}
+          onClick={() => onPanelChange(key)}
+          className={`flex flex-1 flex-col items-center gap-0.5 py-2 text-[10px] font-medium transition-colors ${
+            activePanel === key ? 'text-indigo-600' : 'text-gray-400'
+          }`}
+        >
+          {icon}
+          <span className="flex items-center gap-1">
+            {label}
+            {badge > 0 && (
+              <span className="inline-flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-gray-100 px-1 text-[9px] font-semibold text-gray-500">
+                {badge}
+              </span>
+            )}
+          </span>
+        </button>
+      ))}
+    </nav>
   );
 }
 

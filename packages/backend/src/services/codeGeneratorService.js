@@ -55,9 +55,9 @@ class CodeGeneratorService {
    * @returns {Promise<Object>} Parsed requirements object from the LLM
    */
   async analyzeRequirements(userMessage, contextMd, options) {
-    const { projectId, userId, correlationId } = options;
+    const { projectId, userId, correlationId, model } = options;
 
-    logger.info('Analyzing requirements', { projectId, correlationId });
+    logger.info('Analyzing requirements', { projectId, correlationId, model });
 
     const { systemMessage, prompt, maxTokens, temperature } =
       buildRequirementsPrompt(userMessage, contextMd);
@@ -76,6 +76,7 @@ class CodeGeneratorService {
           maxTokens: maxTokens || 4096,
           temperature: temperature ?? 0.4,
           responseFormat: 'json',
+          modelOverride: model,
         }),
     });
 
@@ -103,9 +104,9 @@ class CodeGeneratorService {
    * @returns {Promise<{files: Array<{path: string, content: string, language: string}>}>}
    */
   async generateScaffold(requirements, options) {
-    const { projectId, userId, correlationId } = options;
+    const { projectId, userId, correlationId, model } = options;
 
-    logger.info('Generating scaffold', { projectId, correlationId });
+    logger.info('Generating scaffold', { projectId, correlationId, model });
 
     const { systemMessage, prompt, maxTokens, temperature } =
       buildScaffoldPrompt(requirements);
@@ -124,6 +125,7 @@ class CodeGeneratorService {
           maxTokens: maxTokens || 4096,
           temperature: temperature ?? 0.3,
           responseFormat: 'json',
+          modelOverride: model,
         }),
     });
 
@@ -159,12 +161,13 @@ class CodeGeneratorService {
    * @returns {Promise<{path: string, content: string, language: string}>}
    */
   async generateFile(requirements, existingFiles, fileSpec, contextMd, options) {
-    const { projectId, userId, correlationId } = options;
+    const { projectId, userId, correlationId, model } = options;
 
     logger.info('Generating file', {
       projectId,
       correlationId,
       filePath: fileSpec.path,
+      model,
     });
 
     const { systemMessage, prompt, maxTokens, temperature } =
@@ -183,6 +186,7 @@ class CodeGeneratorService {
           prompt,
           maxTokens: maxTokens || 8192,
           temperature: temperature ?? 0.3,
+          modelOverride: model,
         }),
     });
 
@@ -215,13 +219,14 @@ class CodeGeneratorService {
    * @returns {Promise<{files: Array<{path: string, content: string, language: string}>}>}
    */
   async generateBatchFiles(requirements, fileSpecs, contextMd, options) {
-    const { projectId, userId, correlationId } = options;
+    const { projectId, userId, correlationId, model } = options;
 
     logger.info('Generating batch files', {
       projectId,
       correlationId,
       fileCount: fileSpecs.length,
       filePaths: fileSpecs.map((f) => f.path),
+      model,
     });
 
     const { systemMessage, prompt, maxTokens, temperature } =
@@ -241,6 +246,7 @@ class CodeGeneratorService {
           maxTokens: maxTokens || 8192,
           temperature: temperature ?? 0.3,
           responseFormat: 'json',
+          modelOverride: model,
         }),
     });
 
@@ -276,12 +282,13 @@ class CodeGeneratorService {
    * @returns {Promise<{files: Array, summary: string, envVarsNeeded: Array}>}
    */
   async iterateCode(userMessage, currentFiles, requirements, contextMd, options) {
-    const { projectId, userId, correlationId } = options;
+    const { projectId, userId, correlationId, model } = options;
 
     logger.info('Iterating code', {
       projectId,
       correlationId,
       currentFileCount: currentFiles.length,
+      model,
     });
 
     const { systemMessage, prompt, maxTokens, temperature } =
@@ -301,6 +308,7 @@ class CodeGeneratorService {
           maxTokens: maxTokens || 8192,
           temperature: temperature ?? 0.3,
           responseFormat: 'json',
+          modelOverride: model,
         }),
     });
 

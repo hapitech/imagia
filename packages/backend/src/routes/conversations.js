@@ -21,6 +21,7 @@ const createConversationSchema = Joi.object({
 
 const sendMessageSchema = Joi.object({
   content: Joi.string().trim().min(1).required(),
+  model: Joi.string().trim().max(255).optional(), // LLM model override (e.g. 'auto' or model_id)
   secrets: Joi.array()
     .items(
       Joi.object({
@@ -156,7 +157,7 @@ router.get('/:id/messages', async (req, res, next) => {
 // POST /:id/messages - Send message
 router.post('/:id/messages', validate(sendMessageSchema), async (req, res, next) => {
   try {
-    const { content, secrets, attachment_ids } = req.body;
+    const { content, model, secrets, attachment_ids } = req.body;
 
     // Verify ownership through the conversation's project
     const conversation = await db('conversations')
@@ -260,6 +261,7 @@ router.post('/:id/messages', validate(sendMessageSchema), async (req, res, next)
       projectId: conversation.project_id,
       conversationId: conversation.id,
       messageId: message.id,
+      model: model || 'auto',
     });
 
     res.status(200).json({

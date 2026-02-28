@@ -5,6 +5,7 @@ const { requireUser } = require('../middleware/auth');
 const { validate } = require('../middleware/requestValidator');
 const deployQueue = require('../queues/deployQueue');
 const railwayService = require('../services/railwayService');
+const cloudflareService = require('../services/cloudflareService');
 
 const router = express.Router();
 router.use(requireUser);
@@ -150,10 +151,41 @@ router.patch('/:projectId/domain', validate(customDomainSchema), async (req, res
       .where({ id: deployment.id })
       .update({ custom_domain: req.body.domain, updated_at: db.fn.now() });
 
+    // Also create a Custom Hostname in Cloudflare for SSL provisioning
+    let cfHostname;
+    try {
+      cfHostname = await cloudflareService.createCustomHostname(req.body.domain);
+
+      // Write KV entry so the Worker can route this domain
+      const targetUrl = deployment.url || project.deployment_url;
+      if (targetUrl) {
+        await cloudflareService.putKvEntry(req.body.domain, targetUrl);
+      }
+
+      // Store in project_domains table
+      await db('project_domains').insert({
+        project_id: req.params.projectId,
+        domain_type: 'custom',
+        domain: req.body.domain,
+        target_url: deployment.url || project.deployment_url,
+        cloudflare_hostname_id: cfHostname?.id || null,
+        ssl_status: 'pending',
+        is_primary: false,
+      }).onConflict('domain').ignore();
+    } catch (cfError) {
+      // Log but don't fail — Railway domain was configured successfully
+      console.error('Cloudflare custom hostname setup failed:', cfError.message);
+    }
+
     res.json({
       message: 'Custom domain configured',
       domain: req.body.domain,
       dns_records: result.status?.dnsRecords || [],
+      cloudflare: cfHostname ? {
+        hostname_id: cfHostname.id,
+        ssl_status: cfHostname.ssl?.status || 'pending',
+        instructions: `Point a CNAME from "${req.body.domain}" to "imagia.net"`,
+      } : null,
     });
   } catch (err) {
     next(err);

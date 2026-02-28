@@ -29,6 +29,12 @@ const config = {
   // Railway
   railwayApiToken: process.env.RAILWAY_API_TOKEN,
 
+  // Cloudflare
+  cloudflareApiToken: process.env.CLOUDFLARE_API_TOKEN,
+  cloudflareAccountId: process.env.CLOUDFLARE_ACCOUNT_ID,
+  cloudflareZoneId: process.env.CLOUDFLARE_ZONE_ID,
+  cloudflareKvNamespaceId: process.env.CLOUDFLARE_KV_NAMESPACE_ID,
+
   // AWS
   awsRegion: process.env.AWS_REGION || 'us-east-1',
   awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID,

@@ -23,16 +23,17 @@ class AppBuilderService {
    * @returns {Promise<{success: boolean, filesCreated: number, requirements: Object}>}
    */
   async buildFromMessage(options) {
-    const { projectId, conversationId, messageId, userId, correlationId } = options;
+    const { projectId, conversationId, messageId, userId, correlationId, model } = options;
 
     logger.info('Starting build from message', {
       projectId,
       conversationId,
       messageId,
       correlationId,
+      model,
     });
 
-    const trackerOptions = { projectId, userId, correlationId };
+    const trackerOptions = { projectId, userId, correlationId, model };
 
     try {
       // ---------------------------------------------------------------
@@ -314,16 +315,17 @@ class AppBuilderService {
    * @returns {Promise<{success: boolean, filesChanged: number, summary: string}>}
    */
   async iterateFromMessage(options) {
-    const { projectId, conversationId, messageId, userId, correlationId } = options;
+    const { projectId, conversationId, messageId, userId, correlationId, model } = options;
 
     logger.info('Starting iteration from message', {
       projectId,
       conversationId,
       messageId,
       correlationId,
+      model,
     });
 
-    const trackerOptions = { projectId, userId, correlationId };
+    const trackerOptions = { projectId, userId, correlationId, model };
 
     try {
       // ---------------------------------------------------------------

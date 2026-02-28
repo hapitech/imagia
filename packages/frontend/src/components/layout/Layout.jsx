@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { UserButton } from '@clerk/clerk-react';
 import useAuth from '../../hooks/useAuth';
+import useIsMobile from '../../hooks/useIsMobile';
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: DashboardIcon },
@@ -14,37 +15,61 @@ const navItems = [
 export default function Layout() {
   useAuth(); // Wires up Clerk token getter for API requests
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const isMobile = useIsMobile();
 
   return (
     <div className="flex h-screen overflow-hidden">
+      {/* Mobile backdrop */}
+      {isMobile && mobileMenuOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-black/40 transition-opacity"
+          onClick={() => setMobileMenuOpen(false)}
+        />
+      )}
+
       {/* Sidebar */}
       <aside
-        className={`${
-          sidebarOpen ? 'w-64' : 'w-16'
-        } flex flex-col bg-gray-900 text-white transition-all duration-200 ease-in-out`}
+        className={`flex flex-col bg-gray-900 text-white transition-all duration-200 ease-in-out ${
+          isMobile
+            ? `fixed inset-y-0 left-0 z-40 w-64 transform ${mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}`
+            : sidebarOpen ? 'w-64' : 'w-16'
+        }`}
       >
         {/* Sidebar header */}
         <div className="flex h-16 items-center justify-between px-4">
-          {sidebarOpen && (
+          {(isMobile || sidebarOpen) && (
             <span className="text-xl font-bold tracking-tight">
               <span className="text-primary">Ima</span>gia
             </span>
           )}
-          <button
-            onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="rounded p-1.5 text-gray-400 hover:bg-gray-800 hover:text-white"
-            aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
-          >
-            {sidebarOpen ? (
+          {isMobile ? (
+            <button
+              onClick={() => setMobileMenuOpen(false)}
+              className="rounded p-1.5 text-gray-400 hover:bg-gray-800 hover:text-white"
+              aria-label="Close menu"
+            >
               <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
               </svg>
-            ) : (
-              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
-              </svg>
-            )}
-          </button>
+            </button>
+          ) : (
+            <button
+              onClick={() => setSidebarOpen(!sidebarOpen)}
+              className="rounded p-1.5 text-gray-400 hover:bg-gray-800 hover:text-white"
+              aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+            >
+              {sidebarOpen ? (
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+                </svg>
+              ) : (
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+                </svg>
+              )}
+            </button>
+          )}
         </div>
 
         {/* Nav links */}
@@ -54,6 +79,7 @@ export default function Layout() {
               key={to}
               to={to}
               end={to === '/'}
+              onClick={() => isMobile && setMobileMenuOpen(false)}
               className={({ isActive }) =>
                 `flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
                   isActive
@@ -63,14 +89,14 @@ export default function Layout() {
               }
             >
               <Icon className="h-5 w-5 flex-shrink-0" />
-              {sidebarOpen && <span>{label}</span>}
+              {(isMobile || sidebarOpen) && <span>{label}</span>}
             </NavLink>
           ))}
         </nav>
 
         {/* Sidebar footer */}
         <div className="border-t border-gray-800 p-4">
-          {sidebarOpen && (
+          {(isMobile || sidebarOpen) && (
             <p className="text-xs text-gray-500">Build what you can imagine</p>
           )}
         </div>
@@ -79,8 +105,19 @@ export default function Layout() {
       {/* Main area */}
       <div className="flex flex-1 flex-col overflow-hidden">
         {/* Top header bar */}
-        <header className="flex h-16 items-center justify-between border-b border-gray-200 bg-white px-6">
+        <header className="flex h-16 items-center justify-between border-b border-gray-200 bg-white px-4 md:px-6">
           <div className="flex items-center gap-2">
+            {isMobile && (
+              <button
+                onClick={() => setMobileMenuOpen(true)}
+                className="rounded p-2 text-gray-500 hover:bg-gray-100"
+                aria-label="Open menu"
+              >
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+              </button>
+            )}
             <span className="text-lg font-semibold text-gray-800">
               <span className="text-primary">Ima</span>gia
             </span>
@@ -91,7 +128,7 @@ export default function Layout() {
         </header>
 
         {/* Page content */}
-        <main className="flex-1 overflow-auto bg-gray-50 p-6">
+        <main className="flex-1 overflow-auto bg-gray-50 p-0 md:p-6">
           <Outlet />
         </main>
       </div>

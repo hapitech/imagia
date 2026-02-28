@@ -146,6 +146,23 @@ export function getDeploymentCosts(projectId) {
   return api.get(`/deployments/${projectId}/costs`).then((r) => r.data);
 }
 
+// ----- Domains -----
+export function getProjectDomains(projectId) {
+  return api.get(`/domains/${projectId}/domains`).then((r) => r.data);
+}
+
+export function addCustomDomain(projectId, domain) {
+  return api.post(`/domains/${projectId}/domains/custom`, { domain }).then((r) => r.data);
+}
+
+export function removeProjectDomain(projectId, domainId) {
+  return api.delete(`/domains/${projectId}/domains/${domainId}`).then((r) => r.data);
+}
+
+export function getDomainStatus(projectId, domainId) {
+  return api.get(`/domains/${projectId}/domains/${domainId}/status`).then((r) => r.data);
+}
+
 // ----- GitHub -----
 export function githubConnect() {
   return api.post('/github/connect').then((r) => r.data);
@@ -202,6 +219,19 @@ export function deleteMarketingAsset(projectId, assetId) {
 
 export function regenerateMarketingAsset(projectId, assetType) {
   return api.post(`/marketing/assets/${projectId}/regenerate/${assetType}`).then((r) => r.data);
+}
+
+// ----- Models -----
+export function getAvailableModels() {
+  return api.get('/models').then((r) => r.data);
+}
+
+export function getModelRecommendation(message) {
+  return api.get('/models/recommend', { params: { message } }).then((r) => r.data);
+}
+
+export function getModelResearchLog() {
+  return api.get('/models/research-log').then((r) => r.data);
 }
 
 // ----- Prompts -----

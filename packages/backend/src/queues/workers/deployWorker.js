@@ -13,6 +13,7 @@ const deployQueue = require('../deployQueue');
 const { db } = require('../../config/database');
 const logger = require('../../config/logger');
 const railwayService = require('../../services/railwayService');
+const cloudflareService = require('../../services/cloudflareService');
 const progressEmitter = require('../progressEmitter');
 const { decrypt } = require('../../utils/encryption');
 const costTracker = require('../../services/costTracker');
@@ -153,12 +154,59 @@ deployQueue.process(async (job) => {
       updated_at: db.fn.now(),
     });
 
-    // ---- Stage 5: Generate domain (60-65%) ----
+    // ---- Stage 5: Generate domain + assign subdomain (60-65%) ----
     await emitProgress(projectId, 60, 'deploying', 'Setting up domain...');
 
     let deploymentUrl = project.deployment_url;
-    if (!deploymentUrl && environmentId) {
-      deploymentUrl = await railwayService.generateDomain(railwayServiceId, environmentId);
+    let railwayUrl = deploymentUrl;
+    if (!railwayUrl && environmentId) {
+      railwayUrl = await railwayService.generateDomain(railwayServiceId, environmentId);
+    }
+
+    // Auto-assign an imagia.net subdomain via Cloudflare KV
+    try {
+      const existingDomain = await db('project_domains')
+        .where({ project_id: projectId, domain_type: 'subdomain' })
+        .first();
+
+      if (existingDomain) {
+        // Reuse existing subdomain, update target if Railway URL changed
+        if (railwayUrl && existingDomain.target_url !== railwayUrl) {
+          await cloudflareService.putKvEntry(existingDomain.subdomain_slug, railwayUrl);
+          await db('project_domains').where({ id: existingDomain.id }).update({
+            target_url: railwayUrl,
+            updated_at: db.fn.now(),
+          });
+        }
+        deploymentUrl = `https://${existingDomain.domain}`;
+      } else if (railwayUrl) {
+        // Generate slug from project name
+        const slug = slugify(project.name);
+        const uniqueSlug = await ensureUniqueSlug(slug);
+        const domain = `${uniqueSlug}.imagia.net`;
+
+        await cloudflareService.putKvEntry(uniqueSlug, railwayUrl);
+
+        await db('project_domains').insert({
+          project_id: projectId,
+          domain_type: 'subdomain',
+          domain,
+          subdomain_slug: uniqueSlug,
+          target_url: railwayUrl,
+          ssl_status: 'active', // Cloudflare wildcard covers *.imagia.net
+          is_primary: true,
+          verified_at: db.fn.now(),
+        });
+
+        deploymentUrl = `https://${domain}`;
+        logger.info('Subdomain assigned', { projectId, domain, railwayUrl });
+      }
+    } catch (subdomainError) {
+      logger.error('Failed to assign subdomain, falling back to Railway URL', {
+        projectId,
+        error: subdomainError.message,
+      });
+      deploymentUrl = railwayUrl || deploymentUrl;
     }
 
     // ---- Stage 6: Wait for deployment (65-90%) ----
@@ -268,6 +316,32 @@ deployQueue.process(async (job) => {
 
 async function emitProgress(projectId, progress, stage, message) {
   await progressEmitter.emit(projectId, { progress, stage, message });
+}
+
+/**
+ * Convert a project name to a URL-safe subdomain slug.
+ */
+function slugify(name) {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-') // non-alphanumeric → hyphens
+    .replace(/^-+|-+$/g, '')      // trim leading/trailing hyphens
+    .substring(0, 63)             // DNS label max length
+    || 'app';                     // fallback
+}
+
+/**
+ * Ensure the slug is unique in project_domains.
+ * Appends a random suffix if the slug is taken.
+ */
+async function ensureUniqueSlug(slug) {
+  const existing = await db('project_domains').where({ subdomain_slug: slug }).first();
+  if (!existing) return slug;
+
+  // Append random 4-char suffix
+  const suffix = Math.random().toString(36).substring(2, 6);
+  const newSlug = `${slug.substring(0, 58)}-${suffix}`;
+  return newSlug;
 }
 
 // ---------------------------------------------------------------------------

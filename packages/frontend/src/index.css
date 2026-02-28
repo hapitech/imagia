@@ -5,3 +5,9 @@
 body {
   @apply bg-gray-50;
 }
+
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}

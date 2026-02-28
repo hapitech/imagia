@@ -112,7 +112,7 @@ export default function useChat(projectId) {
 
   // ---- Send a message ---------------------------------------------------------
   const sendMessage = useCallback(
-    async (content, secrets) => {
+    async (content, secrets, selectedModel) => {
       if (!conversationId || !content.trim()) {
         return null;
       }
@@ -152,6 +152,9 @@ export default function useChat(projectId) {
         setPendingAttachments([]);
 
         const payload = { content };
+        if (selectedModel) {
+          payload.model = selectedModel;
+        }
         if (secrets && secrets.length > 0) {
           payload.secrets = secrets;
         }

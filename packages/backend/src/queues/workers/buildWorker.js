@@ -91,6 +91,7 @@ buildQueue.process(async (job) => {
       messageId,
       userId,
       correlationId,
+      model: job.data.model || undefined,
     };
 
     let buildResult;

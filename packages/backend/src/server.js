@@ -25,6 +25,8 @@ const deploymentRoutes = require('./routes/deployments');
 const githubRoutes = require('./routes/github');
 const marketingRoutes = require('./routes/marketing');
 const socialRoutes = require('./routes/social');
+const domainRoutes = require('./routes/domains');
+const modelRoutes = require('./routes/models');
 
 const app = express();
 
@@ -89,6 +91,8 @@ app.use('/api/deployments', deploymentRoutes);
 app.use('/api/github', githubRoutes);
 app.use('/api/marketing', marketingRoutes);
 app.use('/api/social', socialRoutes);
+app.use('/api/domains', domainRoutes);
+app.use('/api/models', modelRoutes);
 
 // In production, serve the frontend SPA from the built dist/ folder
 if (config.isProduction) {
