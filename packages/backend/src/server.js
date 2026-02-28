@@ -63,7 +63,13 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'"],
       workerSrc: ["'self'", "blob:"],
       fontSrc: ["'self'", "data:"],
+      upgradeInsecureRequests: [],
     },
+  } : false,
+  strictTransportSecurity: config.isProduction ? {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true,
   } : false,
 }));
 app.use(cors({
