@@ -30,6 +30,9 @@ const modelRoutes = require('./routes/models');
 
 const app = express();
 
+// Trust proxy (Railway runs behind a reverse proxy)
+app.set('trust proxy', 1);
+
 // Sentry
 if (config.sentryDsn) {
   Sentry.init({
