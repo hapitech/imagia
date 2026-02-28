@@ -1,11 +1,15 @@
 import { Link } from 'react-router-dom';
+import ImagiaLogo from '../components/ImagiaLogo';
 
 export default function PrivacyPolicy() {
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="border-b border-gray-200 bg-white">
         <div className="mx-auto max-w-4xl px-6 py-4 flex items-center justify-between">
-          <Link to="/" className="text-xl font-bold text-gray-900">Imagia</Link>
+          <Link to="/" className="flex items-center gap-2 text-xl font-bold text-gray-900">
+            <ImagiaLogo className="h-7 w-7" />
+            <span><span className="text-indigo-600">Ima</span>gia</span>
+          </Link>
           <div className="flex gap-4 text-sm">
             <Link to="/terms" className="text-gray-600 hover:text-gray-900">Terms of Service</Link>
             <Link to="/sign-in" className="text-indigo-600 hover:text-indigo-700 font-medium">Sign In</Link>

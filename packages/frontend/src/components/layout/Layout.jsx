@@ -3,6 +3,7 @@ import { NavLink, Outlet } from 'react-router-dom';
 import { UserButton, useUser } from '@clerk/clerk-react';
 import useAuth from '../../hooks/useAuth';
 import useIsMobile from '../../hooks/useIsMobile';
+import ImagiaLogo from '../ImagiaLogo';
 
 const ADMIN_EMAIL = 'ben@hapi.vc';
 
@@ -46,10 +47,13 @@ export default function Layout() {
       >
         {/* Sidebar header */}
         <div className="flex h-16 items-center justify-between px-4">
-          {(isMobile || sidebarOpen) && (
-            <span className="text-xl font-bold tracking-tight">
-              <span className="text-primary">Ima</span>gia
+          {(isMobile || sidebarOpen) ? (
+            <span className="flex items-center gap-2 text-xl font-bold tracking-tight">
+              <ImagiaLogo className="h-7 w-7" />
+              <span><span className="text-primary">Ima</span>gia</span>
             </span>
+          ) : (
+            <ImagiaLogo className="h-7 w-7" />
           )}
           {isMobile ? (
             <button
@@ -126,8 +130,9 @@ export default function Layout() {
                 </svg>
               </button>
             )}
-            <span className="text-lg font-semibold text-gray-800">
-              <span className="text-primary">Ima</span>gia
+            <span className="flex items-center gap-2 text-lg font-semibold text-gray-800">
+              <ImagiaLogo className="h-6 w-6" />
+              <span><span className="text-primary">Ima</span>gia</span>
             </span>
           </div>
           <div className="flex items-center gap-4">

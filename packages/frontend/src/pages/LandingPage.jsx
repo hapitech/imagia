@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { joinWaitlist } from '../services/api';
+import ImagiaLogo from '../components/ImagiaLogo';
 
 const features = [
   {
@@ -149,8 +150,9 @@ export default function LandingPage() {
     <div className="min-h-screen bg-white">
       {/* Nav */}
       <nav className="flex items-center justify-between px-6 py-4 md:px-12">
-        <span className="text-2xl font-bold tracking-tight">
-          <span className="text-indigo-600">Ima</span>gia
+        <span className="flex items-center gap-2 text-2xl font-bold tracking-tight">
+          <ImagiaLogo className="h-8 w-8" />
+          <span><span className="text-indigo-600">Ima</span>gia</span>
         </span>
         <Link
           to="/sign-in"
