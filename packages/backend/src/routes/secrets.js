@@ -2,6 +2,7 @@ const express = require('express');
 const { db } = require('../config/database');
 const { requireUser } = require('../middleware/auth');
 const { encrypt } = require('../utils/encryption');
+const secretDetector = require('../services/secretDetector');
 
 const router = express.Router();
 
@@ -69,6 +70,50 @@ router.post('/:projectId', async (req, res, next) => {
       .returning(['id', 'key', 'type', 'description']);
 
     res.status(201).json(secret);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /:projectId/detect - Scan project files for required secrets
+router.post('/:projectId/detect', async (req, res, next) => {
+  try {
+    const project = await verifyProjectOwnership(req.params.projectId, req.user.id);
+    if (!project) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+
+    // Fetch all project files
+    const files = await db('project_files')
+      .where({ project_id: req.params.projectId })
+      .select('file_path', 'content');
+
+    // Scan each file for secrets
+    const secretMap = new Map(); // key -> { key, type, reason, files[] }
+    for (const file of files) {
+      if (!file.content) continue;
+      const detected = secretDetector.detectSecrets(file.content);
+      for (const s of detected) {
+        if (secretMap.has(s.key)) {
+          const existing = secretMap.get(s.key);
+          if (!existing.files.includes(file.file_path)) {
+            existing.files.push(file.file_path);
+          }
+        } else {
+          secretMap.set(s.key, { key: s.key, type: s.type, reason: s.reason, files: [file.file_path] });
+        }
+      }
+    }
+
+    // Filter out secrets already configured
+    const existingSecrets = await db('project_secrets')
+      .where({ project_id: req.params.projectId })
+      .select('key');
+    const existingKeys = new Set(existingSecrets.map((s) => s.key));
+
+    const detected = [...secretMap.values()].filter((s) => !existingKeys.has(s.key));
+
+    res.json({ detected });
   } catch (err) {
     next(err);
   }

@@ -9,6 +9,7 @@ import {
   getProjectSecrets,
   addSecret,
   deleteSecret,
+  detectSecrets,
   deployProject,
   getDeploymentStatus,
   githubPush,
@@ -458,6 +459,28 @@ export default function ProjectBuilder() {
     }
   }
 
+  // -- Secret detection from files --
+  const [fileDetectedSecrets, setFileDetectedSecrets] = useState(null);
+  const [detecting, setDetecting] = useState(false);
+
+  async function handleDetectSecrets() {
+    try {
+      setDetecting(true);
+      const data = await detectSecrets(projectId);
+      setFileDetectedSecrets(data.detected || []);
+    } catch (err) {
+      console.error('Secret detection failed:', err);
+    } finally {
+      setDetecting(false);
+    }
+  }
+
+  function handleAddDetectedSecret(secret) {
+    setNewSecret({ key: secret.key, value: '', type: secret.type || 'api_key' });
+    // Remove from detected list
+    setFileDetectedSecrets((prev) => prev?.filter((s) => s.key !== secret.key) || null);
+  }
+
   // -- Domain handlers --
   async function handleAddDomain(domain) {
     try {
@@ -798,7 +821,7 @@ export default function ProjectBuilder() {
             <FilesTab files={files} selectedFile={selectedFile} onSelectFile={setSelectedFile} collapsedFolders={collapsedFolders} onToggleFolder={toggleFolder} mobileMode />
           )}
           {mobilePanel === 'secrets' && (
-            <SecretsTab secrets={secrets} newSecret={newSecret} onNewSecretChange={setNewSecret} onAddSecret={handleAddSecret} onDeleteSecret={handleDeleteSecret} />
+            <SecretsTab secrets={secrets} newSecret={newSecret} onNewSecretChange={setNewSecret} onAddSecret={handleAddSecret} onDeleteSecret={handleDeleteSecret} onDetect={handleDetectSecrets} detecting={detecting} detectedSecrets={fileDetectedSecrets} onAddDetected={handleAddDetectedSecret} />
           )}
           {mobilePanel === 'domains' && (
             <DomainsTab domains={domains} onAddDomain={handleAddDomain} onRemoveDomain={handleRemoveDomain} onRefreshStatus={handleRefreshDomainStatus} deploymentUrl={project?.deployment_url} />
@@ -1182,6 +1205,10 @@ export default function ProjectBuilder() {
               onNewSecretChange={setNewSecret}
               onAddSecret={handleAddSecret}
               onDeleteSecret={handleDeleteSecret}
+              onDetect={handleDetectSecrets}
+              detecting={detecting}
+              detectedSecrets={fileDetectedSecrets}
+              onAddDetected={handleAddDetectedSecret}
             />
           )}
           {activeTab === 'domains' && (
@@ -2313,15 +2340,31 @@ function GitHubModal({
 
 // ---------- Secrets Tab -------------------------------------------------------
 
-function SecretsTab({ secrets, newSecret, onNewSecretChange, onAddSecret, onDeleteSecret }) {
+function SecretsTab({ secrets, newSecret, onNewSecretChange, onAddSecret, onDeleteSecret, onDetect, detecting, detectedSecrets, onAddDetected }) {
   return (
     <div className="h-full overflow-y-auto p-5">
       {/* Header */}
-      <div className="mb-4 flex items-center gap-2">
-        <svg className="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
-        </svg>
-        <h3 className="text-sm font-semibold text-gray-900">Project Secrets</h3>
+      <div className="mb-4 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <svg className="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+          </svg>
+          <h3 className="text-sm font-semibold text-gray-900">Project Secrets</h3>
+        </div>
+        <button
+          onClick={onDetect}
+          disabled={detecting}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50 disabled:opacity-50"
+        >
+          {detecting ? (
+            <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-gray-400 border-t-transparent" />
+          ) : (
+            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+          )}
+          Detect
+        </button>
       </div>
 
       {/* Info notice */}
@@ -2333,6 +2376,49 @@ function SecretsTab({ secrets, newSecret, onNewSecretChange, onAddSecret, onDele
           Secrets are encrypted at rest and never exposed to AI models. They are only injected into your deployed application at runtime.
         </p>
       </div>
+
+      {/* Detected secrets from file scan */}
+      {detectedSecrets && detectedSecrets.length > 0 && (
+        <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h4 className="text-xs font-semibold text-amber-800">
+              Found {detectedSecrets.length} secret{detectedSecrets.length !== 1 ? 's' : ''} in code
+            </h4>
+          </div>
+          <ul className="space-y-2">
+            {detectedSecrets.map((s) => (
+              <li key={s.key} className="flex items-center justify-between rounded-lg bg-white px-3 py-2 border border-amber-100">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-gray-800 truncate">{s.key}</p>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <span className="inline-block rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                      {(s.type || 'env_variable').replace(/_/g, ' ')}
+                    </span>
+                    {s.files && s.files.length > 0 && (
+                      <span className="text-[10px] text-gray-400 truncate" title={s.files.join(', ')}>
+                        {s.files[0]}{s.files.length > 1 ? ` +${s.files.length - 1}` : ''}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <button
+                  onClick={() => onAddDetected(s)}
+                  className="ml-2 shrink-0 rounded-md bg-indigo-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-indigo-700 transition-colors"
+                >
+                  Add
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Detection ran but found nothing */}
+      {detectedSecrets && detectedSecrets.length === 0 && (
+        <div className="mb-5 rounded-lg border border-green-200 bg-green-50 p-3 text-center">
+          <p className="text-xs text-green-700">No additional secrets detected in code.</p>
+        </div>
+      )}
 
       {/* Existing secrets */}
       {secrets.length === 0 ? (

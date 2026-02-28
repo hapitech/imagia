@@ -96,6 +96,10 @@ export function deleteSecret(projectId, secretId) {
   return api.delete(`/secrets/${projectId}/${secretId}`).then((r) => r.data);
 }
 
+export function detectSecrets(projectId) {
+  return api.post(`/secrets/${projectId}/detect`).then((r) => r.data);
+}
+
 // ----- Uploads -----
 export function uploadFiles(projectId, files) {
   const formData = new FormData();
