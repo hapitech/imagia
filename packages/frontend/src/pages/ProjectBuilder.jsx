@@ -15,7 +15,6 @@ import {
   githubPull,
   githubSyncStatus,
   githubCreateRepo,
-  githubConnect,
   getAvailableModels,
   getProjectDomains,
   addCustomDomain,
@@ -546,13 +545,9 @@ export default function ProjectBuilder() {
     }
   }
 
-  async function handleConnectGitHub() {
-    try {
-      const result = await githubConnect();
-      window.open(result.auth_url, '_blank', 'width=600,height=700');
-    } catch (err) {
-      console.error('GitHub connect failed:', err);
-    }
+  function handleConnectGitHub() {
+    // Navigate to Settings where user can connect GitHub via Clerk
+    window.location.href = '/settings';
   }
 
   async function refreshGitHubStatus() {

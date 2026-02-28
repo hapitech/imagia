@@ -164,14 +164,6 @@ export function getDomainStatus(projectId, domainId) {
 }
 
 // ----- GitHub -----
-export function githubConnect() {
-  return api.post('/github/connect').then((r) => r.data);
-}
-
-export function githubCallback(code) {
-  return api.post('/github/callback', { code }).then((r) => r.data);
-}
-
 export function githubListRepos(params) {
   return api.get('/github/repos', { params }).then((r) => r.data);
 }

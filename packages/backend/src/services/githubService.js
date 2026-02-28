@@ -18,7 +18,6 @@ const octokitReady = import('@octokit/rest').then((mod) => {
 
 const axios = require('axios');
 const { db } = require('../config/database');
-const { encrypt, decrypt } = require('../utils/encryption');
 const { createCircuitBreaker } = require('../utils/circuitBreaker');
 const { retryWithBackoff } = require('../utils/retryLogic');
 const config = require('../config/environment');
@@ -36,71 +35,38 @@ class GitHubService {
   }
 
   // ---------------------------------------------------------------------------
-  // OAuth
+  // OAuth — tokens fetched from Clerk (GitHub connected via Clerk social login)
   // ---------------------------------------------------------------------------
 
   /**
-   * Generate the GitHub OAuth authorization URL.
-   */
-  getAuthorizationUrl(state) {
-    const params = new URLSearchParams({
-      client_id: config.githubClientId,
-      redirect_uri: `${config.frontendUrl}/github/callback`,
-      scope: 'repo user:email',
-      state,
-    });
-    return `https://github.com/login/oauth/authorize?${params.toString()}`;
-  }
-
-  /**
-   * Exchange an OAuth code for an access token.
-   */
-  async exchangeCodeForToken(code) {
-    const response = await retryWithBackoff(
-      () =>
-        axios.post(
-          'https://github.com/login/oauth/access_token',
-          {
-            client_id: config.githubClientId,
-            client_secret: config.githubClientSecret,
-            code,
-          },
-          { headers: { Accept: 'application/json' } }
-        ),
-      { maxRetries: 2, baseDelay: 1000, name: 'github-oauth' }
-    );
-
-    const { access_token, error } = response.data;
-    if (error || !access_token) {
-      throw new Error(`GitHub OAuth error: ${error || 'no token received'}`);
-    }
-
-    return access_token;
-  }
-
-  /**
-   * Save encrypted GitHub access token to the user record.
-   */
-  async saveUserToken(userId, accessToken) {
-    const encrypted = encrypt(accessToken);
-    await db('users').where({ id: userId }).update({
-      github_access_token: encrypted,
-      updated_at: db.fn.now(),
-    });
-    logger.info('GitHub access token saved', { userId });
-  }
-
-  /**
    * Get an authenticated Octokit instance for a user.
+   * Fetches the GitHub OAuth token from Clerk's Backend API.
    */
   async _getOctokit(userId) {
     await this.ready;
-    const user = await db('users').where({ id: userId }).select('github_access_token').first();
-    if (!user?.github_access_token) {
-      throw new Error('GitHub account not connected. Please connect your GitHub account first.');
+
+    // Look up the Clerk user ID from our DB
+    const user = await db('users').where({ id: userId }).select('clerk_id').first();
+    if (!user?.clerk_id) {
+      throw new Error('User not found');
     }
-    const token = decrypt(user.github_access_token);
-    return new Octokit({ auth: token });
+
+    // Fetch GitHub OAuth token from Clerk
+    const response = await axios.get(
+      `https://api.clerk.com/v1/users/${user.clerk_id}/oauth_access_tokens/oauth_github`,
+      { headers: { Authorization: `Bearer ${config.clerkSecretKey}` } }
+    );
+
+    const tokenData = response.data?.[0];
+    if (!tokenData?.token) {
+      const err = new Error(
+        'GitHub account not connected. Please connect GitHub in your account settings.'
+      );
+      err.statusCode = 403;
+      throw err;
+    }
+
+    return new Octokit({ auth: tokenData.token });
   }
 
   // ---------------------------------------------------------------------------

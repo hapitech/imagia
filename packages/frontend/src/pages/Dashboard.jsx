@@ -1,10 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   getProjects,
   createProject,
-  githubConnect,
-  githubCallback,
   githubListRepos,
   githubImportRepo,
 } from '../services/api';
@@ -19,7 +17,6 @@ const STATUS_COLORS = {
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -42,16 +39,6 @@ export default function Dashboard() {
   useEffect(() => {
     loadProjects();
   }, []);
-
-  // Handle GitHub OAuth callback redirect
-  useEffect(() => {
-    const code = searchParams.get('gh_code');
-    if (code) {
-      searchParams.delete('gh_code');
-      setSearchParams(searchParams, { replace: true });
-      handleGhCallback(code);
-    }
-  }, [searchParams]);
 
   async function loadProjects() {
     try {
@@ -109,98 +96,6 @@ export default function Dashboard() {
         setGhError(err.response?.data?.error || 'Failed to load repos');
         setGhStep('connect');
       }
-    } finally {
-      setGhLoading(false);
-    }
-  }
-
-  async function handleGhConnect() {
-    try {
-      setGhLoading(true);
-      setGhError(null);
-      const data = await githubConnect();
-      // Open GitHub OAuth in a popup
-      const width = 600;
-      const height = 700;
-      const left = window.screenX + (window.outerWidth - width) / 2;
-      const top = window.screenY + (window.outerHeight - height) / 2;
-      const popup = window.open(
-        data.auth_url,
-        'github-oauth',
-        `width=${width},height=${height},left=${left},top=${top}`
-      );
-
-      // Clean up any stale localStorage keys from prior attempts
-      try { localStorage.removeItem('github-oauth-code'); localStorage.removeItem('github-oauth-error'); } catch {}
-
-      let resolved = false;
-      function resolve(code, error) {
-        if (resolved) return;
-        resolved = true;
-        window.removeEventListener('message', onMessage);
-        window.removeEventListener('storage', onStorage);
-        clearInterval(closedCheck);
-        if (code) {
-          handleGhCallback(code);
-        } else {
-          setGhError(error || 'GitHub connection failed');
-          setGhLoading(false);
-        }
-      }
-
-      // Primary: listen for postMessage from callback page
-      function onMessage(event) {
-        if (event.origin !== window.location.origin) return;
-        if (event.data?.type !== 'github-oauth') return;
-        resolve(event.data.code, event.data.error);
-      }
-      window.addEventListener('message', onMessage);
-
-      // Fallback: listen for localStorage change (if window.opener was severed)
-      function onStorage(event) {
-        if (event.key === 'github-oauth-code' && event.newValue) {
-          try { localStorage.removeItem('github-oauth-code'); } catch {}
-          resolve(event.newValue, null);
-        } else if (event.key === 'github-oauth-error' && event.newValue) {
-          try { localStorage.removeItem('github-oauth-error'); } catch {}
-          resolve(null, event.newValue);
-        }
-      }
-      window.addEventListener('storage', onStorage);
-
-      // Also check if the popup was closed without completing
-      const closedCheck = setInterval(() => {
-        if (!popup || popup.closed) {
-          // Check localStorage one last time in case the storage event was missed
-          try {
-            const code = localStorage.getItem('github-oauth-code');
-            const error = localStorage.getItem('github-oauth-error');
-            localStorage.removeItem('github-oauth-code');
-            localStorage.removeItem('github-oauth-error');
-            if (code) { resolve(code, null); return; }
-            if (error) { resolve(null, error); return; }
-          } catch {}
-          resolve(null, null);
-        }
-      }, 500);
-    } catch (err) {
-      setGhError(err.response?.data?.error || 'Failed to start GitHub connection');
-      setGhLoading(false);
-    }
-  }
-
-  async function handleGhCallback(code) {
-    try {
-      setGhLoading(true);
-      setGhError(null);
-      await githubCallback(code);
-      // Now load repos
-      const data = await githubListRepos({ page: 1, per_page: 30 });
-      setGhRepos(data.repos || []);
-      setGhPage(1);
-      setGhStep('repos');
-    } catch (err) {
-      setGhError(err.response?.data?.error || 'GitHub connection failed');
     } finally {
       setGhLoading(false);
     }
@@ -471,20 +366,21 @@ export default function Dashboard() {
                     <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
                   </svg>
                   <p className="mb-2 text-base font-medium text-gray-700">Connect your GitHub account</p>
-                  <p className="mb-6 text-sm text-gray-500">We need access to import your repositories</p>
+                  <p className="mb-4 text-sm text-gray-500 text-center">
+                    To import repositories, connect your GitHub account in Settings.
+                  </p>
                   <button
-                    onClick={handleGhConnect}
-                    disabled={ghLoading}
-                    className="inline-flex items-center gap-2 rounded-lg bg-gray-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50 transition-colors"
+                    onClick={() => {
+                      setShowImportModal(false);
+                      navigate('/settings');
+                    }}
+                    className="inline-flex items-center gap-2 rounded-lg bg-gray-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-gray-800 transition-colors"
                   >
-                    {ghLoading ? (
-                      <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                    ) : (
-                      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
-                      </svg>
-                    )}
-                    Connect GitHub
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                    Go to Settings
                   </button>
                 </div>
               )}

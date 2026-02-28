@@ -1,6 +1,5 @@
 const express = require('express');
 const Joi = require('joi');
-const crypto = require('crypto');
 const { db } = require('../config/database');
 const { requireUser } = require('../middleware/auth');
 const { validate } = require('../middleware/requestValidator');
@@ -30,32 +29,6 @@ const createRepoSchema = Joi.object({
     .max(100)
     .required(),
   is_private: Joi.boolean().default(false),
-});
-
-// POST /connect - Start GitHub OAuth flow
-router.post('/connect', (req, res) => {
-  const state = crypto.randomBytes(16).toString('hex');
-  // Store state in a short-lived way (we'll use the session/cookie approach)
-  // For now, return the URL to the frontend which handles the redirect
-  const authUrl = githubService.getAuthorizationUrl(state);
-  res.json({ auth_url: authUrl, state });
-});
-
-// POST /callback - Handle GitHub OAuth callback
-router.post('/callback', async (req, res, next) => {
-  try {
-    const { code } = req.body;
-    if (!code) {
-      return res.status(400).json({ error: 'Missing authorization code' });
-    }
-
-    const accessToken = await githubService.exchangeCodeForToken(code);
-    await githubService.saveUserToken(req.user.id, accessToken);
-
-    res.json({ message: 'GitHub account connected successfully' });
-  } catch (err) {
-    next(err);
-  }
 });
 
 // GET /repos - List user's GitHub repos
