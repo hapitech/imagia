@@ -1731,14 +1731,21 @@ function PreviewTab({ project, files }) {
   <style>
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
     img[src=""], img:not([src]) { display: inline-block; background: #e5e7eb; min-height: 40px; min-width: 40px; }
-    #loading { display: flex; align-items: center; justify-content: center; height: 100vh; color: #9ca3af; font-size: 14px; }
+    #loading { display: flex; align-items: center; justify-content: center; height: 100vh; color: #9ca3af; font-size: 14px; flex-direction: column; gap: 8px; }
+    #loading .spinner { width: 24px; height: 24px; border: 3px solid #e5e7eb; border-top-color: #6366f1; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #timeout-msg { display: none; text-align: center; padding: 2rem; color: #6b7280; }
+    #timeout-msg h3 { font-size: 14px; font-weight: 600; color: #374151; margin-bottom: 4px; }
+    #timeout-msg p { font-size: 12px; }
   </style>
 </head>
 <body>
-  <div id="root"><div id="loading">Loading preview...</div></div>
+  <div id="root"><div id="loading"><div class="spinner"></div>Loading preview...</div></div>
+  <div id="timeout-msg"><h3>Preview not available</h3><p>This project may need to be deployed to preview. Complex apps with npm dependencies cannot be previewed in-browser.</p></div>
   <div id="err" style="display:none;padding:1rem;color:#dc2626;font-size:13px;font-family:monospace;white-space:pre-wrap;background:#fef2f2;border-top:2px solid #dc2626;position:fixed;bottom:0;left:0;right:0;max-height:40vh;overflow:auto;z-index:9999"></div>
   <script>
     // Manual Babel transform with proper error handling
+    var _rendered = false;
     window.onerror = function(msg, src, line, col, err) {
       showError((err ? err.stack : msg));
     };
@@ -1746,7 +1753,23 @@ function PreviewTab({ project, files }) {
       var el = document.getElementById('err');
       el.style.display = 'block';
       el.textContent += msg + '\\n\\n';
+      // Also show timeout message if render failed
+      if (!_rendered) {
+        document.getElementById('timeout-msg').style.display = 'block';
+        var ld = document.getElementById('loading');
+        if (ld) ld.style.display = 'none';
+      }
     }
+    // Timeout: if preview hasn't rendered in 8 seconds, show fallback
+    setTimeout(function() {
+      if (!_rendered) {
+        var ld = document.getElementById('loading');
+        if (ld && ld.parentNode) {
+          document.getElementById('timeout-msg').style.display = 'block';
+          ld.style.display = 'none';
+        }
+      }
+    }, 8000);
 
     window.addEventListener('DOMContentLoaded', function() {
       if (typeof Babel === 'undefined') {
@@ -1811,9 +1834,12 @@ function PreviewTab({ project, files }) {
           var _root = ReactDOM.createRoot(document.getElementById('root'));
           var _el = ${escapeForScript(renderExpr)};
           if (_el) {
+            _rendered = true;
             _root.render(_el);
           } else {
-            document.getElementById('root').innerHTML = '<div style="padding:2rem;text-align:center;color:#666">No renderable component found</div>';
+            document.getElementById('timeout-msg').style.display = 'block';
+            var _ld = document.getElementById('loading');
+            if (_ld) _ld.style.display = 'none';
           }
         } catch(_renderErr) {
           showError('Render: ' + _renderErr.message + String.fromCharCode(10) + _renderErr.stack);
