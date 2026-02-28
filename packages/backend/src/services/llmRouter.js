@@ -9,23 +9,23 @@ const logger = require('../config/logger');
 const ROUTING_TABLE = {
   'code-generation': {
     primary: 'anthropic',
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-sonnet-4-6',
     fallback: 'openai',
   },
   'code-iteration': {
     primary: 'anthropic',
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-sonnet-4-6',
     fallback: 'openai',
   },
   'scaffold': {
-    primary: 'fireworks',
-    model: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
-    fallback: 'anthropic',
+    primary: 'anthropic',
+    model: 'claude-sonnet-4-6',
+    fallback: 'fireworks',
   },
   'config-files': {
-    primary: 'fireworks',
-    model: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
-    fallback: 'anthropic',
+    primary: 'anthropic',
+    model: 'claude-sonnet-4-6',
+    fallback: 'fireworks',
   },
   'landing-page': {
     primary: 'openai',
@@ -49,7 +49,7 @@ const ROUTING_TABLE = {
   },
   'demo-script': {
     primary: 'anthropic',
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-sonnet-4-6',
     fallback: 'openai',
   },
 };
@@ -82,7 +82,7 @@ class LLMRouter {
       logger.warn('Unknown task type, defaulting to anthropic', { taskType });
       return this._generateWithProvider('anthropic', {
         ...options,
-        model: options.model || 'claude-sonnet-4-20250514',
+        model: options.model || 'claude-sonnet-4-6',
       });
     }
 

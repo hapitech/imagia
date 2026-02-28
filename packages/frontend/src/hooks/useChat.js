@@ -113,7 +113,9 @@ export default function useChat(projectId) {
   // ---- Send a message ---------------------------------------------------------
   const sendMessage = useCallback(
     async (content, secrets) => {
-      if (!conversationId || !content.trim()) return null;
+      if (!conversationId || !content.trim()) {
+        return null;
+      }
 
       // Optimistic: add user bubble with attachment previews
       const optimisticAttachments = pendingAttachments.map((f) => ({
@@ -158,6 +160,17 @@ export default function useChat(projectId) {
         }
 
         const response = await apiSendMessage(conversationId, payload);
+
+        // If URLs were extracted, update the optimistic message with extraction info
+        if (response.extracted_urls && response.extracted_urls.length > 0) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === optimisticMsg.id
+                ? { ...m, extracted_urls: response.extracted_urls }
+                : m
+            )
+          );
+        }
 
         // If the server detected missing secrets, pause and surface them
         if (response.detected_secrets && response.detected_secrets.length > 0) {

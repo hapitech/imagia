@@ -2,6 +2,7 @@ const { db } = require('../config/database');
 const logger = require('../config/logger');
 const codeGeneratorService = require('./codeGeneratorService');
 const contextService = require('./contextService');
+const { buildEnrichedMessage } = require('./urlExtractor');
 const progressEmitter = require('../queues/progressEmitter');
 const { generateContentHash } = require('../utils/contentHash');
 
@@ -585,16 +586,33 @@ class AppBuilderService {
 
   /**
    * Retrieve the user's message content from the messages table.
+   * If the message has URL extractions stored in metadata, enrich
+   * the content with the extracted webpage text so the LLM can reference it.
    * @private
    */
   async _getUserMessage(messageId) {
     const message = await db('messages')
       .where('id', messageId)
-      .select('content')
+      .select('content', 'metadata')
       .first();
 
     if (!message) {
       throw new Error(`Message ${messageId} not found`);
+    }
+
+    // Parse metadata and check for URL extractions
+    let metadata = message.metadata;
+    if (typeof metadata === 'string') {
+      try { metadata = JSON.parse(metadata); } catch { metadata = {}; }
+    }
+    metadata = metadata || {};
+
+    if (metadata.url_extractions && metadata.url_extractions.length > 0) {
+      logger.info('Enriching message with URL extractions', {
+        messageId,
+        urlCount: metadata.url_extractions.length,
+      });
+      return buildEnrichedMessage(message.content, metadata.url_extractions);
     }
 
     return message.content;

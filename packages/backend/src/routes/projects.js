@@ -182,7 +182,7 @@ router.get('/:id/files', async (req, res, next) => {
 
     const files = await db('project_files')
       .where({ project_id: project.id })
-      .select('id', 'file_path', 'language', 'file_size', 'checksum', 'created_at', 'updated_at')
+      .select('id', 'file_path', 'content', 'language', 'file_size', 'checksum', 'created_at', 'updated_at')
       .orderBy('file_path', 'asc');
 
     res.json({ files });

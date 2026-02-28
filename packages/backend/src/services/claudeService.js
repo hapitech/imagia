@@ -6,10 +6,11 @@ const { llmCacheKey } = require('../utils/contentHash');
 const config = require('../config/environment');
 const logger = require('../config/logger');
 
-const DEFAULT_MODEL = 'claude-sonnet-4-20250514';
+const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
 // Pricing per million tokens
 const PRICING = {
+  'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
   'claude-sonnet-4-20250514': { input: 3.0, output: 15.0 },
 };
 

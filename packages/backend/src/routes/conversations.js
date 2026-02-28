@@ -5,6 +5,7 @@ const { requireUser } = require('../middleware/auth');
 const { validate } = require('../middleware/requestValidator');
 const { encrypt } = require('../utils/encryption');
 const secretDetector = require('../services/secretDetector');
+const urlExtractor = require('../services/urlExtractor');
 const buildQueue = require('../queues/buildQueue');
 
 const router = express.Router();
@@ -191,12 +192,31 @@ router.post('/:id/messages', validate(sendMessageSchema), async (req, res, next)
       }
     }
 
-    // Store user message
+    // Extract URLs from the message content (non-blocking for response)
+    const detectedUrls = urlExtractor.detectUrls(content);
+    let urlExtractions = [];
+    if (detectedUrls.length > 0) {
+      const { extractions } = await urlExtractor.extractUrlsFromMessage(content);
+      urlExtractions = extractions;
+    }
+
+    // Store user message with URL extractions in metadata
+    const messageMetadata = {};
+    if (urlExtractions.length > 0) {
+      messageMetadata.url_extractions = urlExtractions.map((e) => ({
+        url: e.url,
+        title: e.title,
+        description: e.description,
+        content: e.content,
+      }));
+    }
+
     const [message] = await db('messages')
       .insert({
         conversation_id: req.params.id,
         role: 'user',
         content,
+        metadata: JSON.stringify(messageMetadata),
       })
       .returning('*');
 
@@ -231,6 +251,7 @@ router.post('/:id/messages', validate(sendMessageSchema), async (req, res, next)
       return res.status(200).json({
         message: { ...message, attachments },
         detected_secrets: missingSecrets,
+        extracted_urls: urlExtractions.map((e) => ({ url: e.url, title: e.title })),
       });
     }
 
@@ -244,6 +265,7 @@ router.post('/:id/messages', validate(sendMessageSchema), async (req, res, next)
     res.status(200).json({
       message: { ...message, attachments },
       job_id: job.id,
+      extracted_urls: urlExtractions.map((e) => ({ url: e.url, title: e.title })),
     });
   } catch (err) {
     next(err);

@@ -67,6 +67,8 @@ class CodeGeneratorService {
       userId,
       taskType: 'code-generation',
       correlationId,
+      prompt,
+      systemMessage,
       callFn: () =>
         llmRouter.route('code-generation', {
           systemMessage,
@@ -113,6 +115,8 @@ class CodeGeneratorService {
       userId,
       taskType: 'scaffold',
       correlationId,
+      prompt,
+      systemMessage,
       callFn: () =>
         llmRouter.route('scaffold', {
           systemMessage,
@@ -171,6 +175,8 @@ class CodeGeneratorService {
       userId,
       taskType: 'code-generation',
       correlationId,
+      prompt,
+      systemMessage,
       callFn: () =>
         llmRouter.route('code-generation', {
           systemMessage,
@@ -226,6 +232,8 @@ class CodeGeneratorService {
       userId,
       taskType: 'code-generation',
       correlationId,
+      prompt,
+      systemMessage,
       callFn: () =>
         llmRouter.route('code-generation', {
           systemMessage,
@@ -284,6 +292,8 @@ class CodeGeneratorService {
       userId,
       taskType: 'code-iteration',
       correlationId,
+      prompt,
+      systemMessage,
       callFn: () =>
         llmRouter.route('code-iteration', {
           systemMessage,

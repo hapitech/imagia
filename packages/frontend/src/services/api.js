@@ -67,7 +67,7 @@ export function getProjectFiles(projectId) {
 
 // ----- Conversations -----
 export function getConversations(projectId) {
-  return api.get(`/projects/${projectId}/conversations`).then((r) => r.data);
+  return api.get('/conversations', { params: { project_id: projectId } }).then((r) => r.data);
 }
 
 export function createConversation(data) {
@@ -85,15 +85,15 @@ export function sendMessage(conversationId, data) {
 
 // ----- Secrets -----
 export function getProjectSecrets(projectId) {
-  return api.get(`/projects/${projectId}/secrets`).then((r) => r.data);
+  return api.get(`/secrets/${projectId}`).then((r) => r.data);
 }
 
 export function addSecret(projectId, data) {
-  return api.post(`/projects/${projectId}/secrets`, data).then((r) => r.data);
+  return api.post(`/secrets/${projectId}`, data).then((r) => r.data);
 }
 
 export function deleteSecret(projectId, secretId) {
-  return api.delete(`/projects/${projectId}/secrets/${secretId}`).then((r) => r.data);
+  return api.delete(`/secrets/${projectId}/${secretId}`).then((r) => r.data);
 }
 
 // ----- Uploads -----

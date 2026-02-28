@@ -149,7 +149,7 @@ function buildFileTree(files) {
 
 export default function ProjectBuilder() {
   const { id: projectId } = useParams();
-  const { progress, stage, isConnected } = useProgress(projectId);
+  const { progress, stage, message: progressMessage, isConnected } = useProgress(projectId);
   const {
     messages,
     isLoading: chatLoading,
@@ -181,7 +181,7 @@ export default function ProjectBuilder() {
   const [isBuilding, setIsBuilding] = useState(false);
   const [buildSuccess, setBuildSuccess] = useState(false);
   const [buildError, setBuildError] = useState(false);
-  const progressMessageRef = useRef('');
+  const latestProgressMessage = useRef('');
 
   // -- Right panel ---
   const [activeTab, setActiveTab] = useState('preview');
@@ -260,13 +260,13 @@ export default function ProjectBuilder() {
 
   // ---- Keep track of progress message text ---
   useEffect(() => {
-    if (stage) progressMessageRef.current = stage;
-  }, [stage]);
+    if (progressMessage) latestProgressMessage.current = progressMessage;
+  }, [progressMessage]);
 
   // ---- Auto-scroll messages --------------------------------------------------
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, detectedSecrets, isSending]);
+  }, [messages, detectedSecrets, isSending, progressMessage]);
 
   // ---- Initialize secret values when detected --------------------------------
   useEffect(() => {
@@ -561,7 +561,7 @@ export default function ProjectBuilder() {
           buildError={buildError}
           progress={progress}
           stage={stage}
-          progressMessage={progressMessageRef.current}
+          progressMessage={progressMessage || latestProgressMessage.current}
         />
 
         {/* -- Messages -- */}
@@ -610,13 +610,30 @@ export default function ProjectBuilder() {
               />
             )}
 
-            {/* Typing indicator */}
-            {isSending && !detectedSecrets && (
+            {/* Thinking / progress indicator */}
+            {(isSending || isBuilding) && !detectedSecrets && (
               <div className="flex justify-start">
-                <div className="flex items-center gap-1.5 rounded-2xl rounded-bl-md bg-gray-100 px-4 py-3">
-                  <span className="h-2 w-2 animate-bounce rounded-full bg-gray-400" style={{ animationDelay: '0ms' }} />
-                  <span className="h-2 w-2 animate-bounce rounded-full bg-gray-400" style={{ animationDelay: '150ms' }} />
-                  <span className="h-2 w-2 animate-bounce rounded-full bg-gray-400" style={{ animationDelay: '300ms' }} />
+                <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-gray-100 px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <svg className="h-4 w-4 animate-spin text-indigo-500" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    <span className="text-sm text-gray-600">
+                      {progressMessage || (isSending ? 'Processing your request...' : 'Working...')}
+                    </span>
+                  </div>
+                  {isBuilding && progress > 0 && progress < 100 && (
+                    <div className="mt-2">
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-200">
+                        <div
+                          className="h-full rounded-full bg-indigo-500 transition-all duration-500"
+                          style={{ width: `${progress}%` }}
+                        />
+                      </div>
+                      <p className="mt-1 text-[10px] text-gray-400">{progress}% complete</p>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -742,7 +759,7 @@ export default function ProjectBuilder() {
 
         {/* -- Tab content -- */}
         <div className="flex-1 overflow-hidden">
-          {activeTab === 'preview' && <PreviewTab project={project} />}
+          {activeTab === 'preview' && <PreviewTab project={project} files={files} />}
           {activeTab === 'files' && (
             <FilesTab
               files={files}
@@ -844,6 +861,7 @@ function MessageBubble({ message }) {
   const parts = useMemo(() => parseContent(message.content), [message.content]);
   const time = fmtTime(message.created_at);
   const attachments = message.attachments || [];
+  const extractedUrls = message.extracted_urls || [];
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -891,6 +909,25 @@ function MessageBubble({ message }) {
             ),
           )}
         </div>
+
+        {/* Extracted URL chips */}
+        {extractedUrls.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {extractedUrls.map((eu) => (
+              <span
+                key={eu.url}
+                className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2.5 py-1 text-[10px] font-medium text-indigo-600"
+                title={eu.url}
+              >
+                <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                </svg>
+                {eu.title || new URL(eu.url).hostname}
+              </span>
+            ))}
+          </div>
+        )}
+
         {time && (
           <span className={`mt-1 text-[10px] ${isUser ? 'text-gray-300' : 'text-gray-400'}`}>
             {time}
@@ -1079,54 +1116,320 @@ function SecretsDetectionCard({
 
 // ---------- Preview Tab -------------------------------------------------------
 
-function PreviewTab({ project }) {
-  const url = project?.deployment_url || project?.deploymentUrl;
+function PreviewTab({ project, files }) {
+  const deployUrl = project?.deployment_url || project?.deploymentUrl;
+  const fileList = Array.isArray(files) ? files : [];
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  if (!url) {
+  // Build an in-browser preview from the generated React/Vite/Next.js files
+  const previewHtml = useMemo(() => {
+    if (fileList.length === 0) return null;
+
+    // Gather files by path
+    const fileMap = {};
+    for (const f of fileList) {
+      const path = f.file_path || f.path || '';
+      fileMap[path] = f.content || '';
+    }
+
+    // Find CSS
+    const indexCss = fileMap['src/index.css'] || fileMap['src/globals.css'] || fileMap['src/app/globals.css'] || '';
+
+    // Helper: extract a valid JS identifier from a file path
+    const toIdentifier = (path) => {
+      const basename = path.split('/').pop();
+      return basename.replace(/\.(jsx|tsx|js|ts)$/, '').replace(/[^a-zA-Z0-9]/g, '');
+    };
+
+    // Helper: strip imports/exports and convert to a named global var
+    const processComponent = (code, name) => {
+      let c = code;
+      // Strip all import lines
+      c = c.replace(/^import\s+.*$/gm, '');
+      // Convert "export default function Foo" → "function Foo"
+      c = c.replace(/^export\s+default\s+function\s+/gm, 'function ');
+      // Convert "export default" → "var Name ="
+      c = c.replace(/^export\s+default\s+/gm, `var ${name} = `);
+      // Convert other exports
+      c = c.replace(/^export\s+/gm, 'var ');
+      return c;
+    };
+
+    // Collect components (prefer .jsx version over extensionless duplicates)
+    const collected = new Map();
+    for (const f of fileList) {
+      const path = f.file_path || f.path || '';
+      const isPage = path.startsWith('src/pages/');
+      const isComp = path.startsWith('src/components/');
+      if (!isPage && !isComp) continue;
+      if (!f.content) continue;
+
+      const hasExt = /\.(jsx|tsx|js|ts)$/.test(path);
+      const name = toIdentifier(path);
+      if (!name) continue;
+
+      const priority = hasExt ? 1 : 0;
+      const existing = collected.get(name);
+      if (existing && existing.priority >= priority) continue;
+
+      collected.set(name, {
+        code: processComponent(f.content, name),
+        priority,
+        isPage,
+      });
+    }
+
+    // Split into components and pages
+    const componentScripts = [];
+    const pageScripts = [];
+    const pageNames = [];
+    for (const [name, { code, isPage }] of collected) {
+      if (isPage) {
+        pageScripts.push(code);
+        pageNames.push(name);
+      } else {
+        componentScripts.push(code);
+      }
+    }
+
+    // Find the "Home" page or first page to render as default
+    const homePage = pageNames.includes('Home') ? 'Home' : pageNames[0] || '';
+
+    // Clean CSS for embedding
+    const cleanCss = indexCss
+      .replace(/@tailwind\s+\w+;/g, '')
+      .replace(/@import\s+.*$/gm, '')
+      .replace(/@layer\s+\w+\s*\{[\s\S]*?\}/g, '')
+      .replace(/@apply\s+[^;]+;/g, '');
+
+    // Escape component code for embedding inside a JS string (used in a <script> block)
+    const escapeForScript = (str) => str
+      .replace(/\\/g, '\\\\')
+      .replace(/`/g, '\\`')
+      .replace(/\$/g, '\\$')
+      .replace(/<\/script>/gi, '<\\/script>');
+
+    const allCode = [
+      ...componentScripts,
+      ...pageScripts,
+    ].join('\n\n');
+
+    // Build render expression
+    const renderExpr = homePage
+      ? `typeof ${homePage} === 'function' ? React.createElement(${homePage}) : null`
+      : pageNames.length > 0
+        ? pageNames.map(n => `typeof ${n} === 'function' ? React.createElement(${n}) : null`).join(' || ') + ' || null'
+        : 'null';
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Preview</title>
+  <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.development.js"><\/script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.development.js"><\/script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js"><\/script>
+  <script src="https://cdn.tailwindcss.com"><\/script>
+  <style>${cleanCss}</style>
+  <style>
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    img[src=""], img:not([src]) { display: inline-block; background: #e5e7eb; min-height: 40px; min-width: 40px; }
+    #loading { display: flex; align-items: center; justify-content: center; height: 100vh; color: #9ca3af; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div id="root"><div id="loading">Loading preview...</div></div>
+  <div id="err" style="display:none;padding:1rem;color:#dc2626;font-size:13px;font-family:monospace;white-space:pre-wrap;background:#fef2f2;border-top:2px solid #dc2626;position:fixed;bottom:0;left:0;right:0;max-height:40vh;overflow:auto;z-index:9999"></div>
+  <script>
+    // Manual Babel transform with proper error handling
+    window.onerror = function(msg, src, line, col, err) {
+      showError((err ? err.stack : msg));
+    };
+    function showError(msg) {
+      var el = document.getElementById('err');
+      el.style.display = 'block';
+      el.textContent += msg + '\\n\\n';
+    }
+
+    window.addEventListener('DOMContentLoaded', function() {
+      if (typeof Babel === 'undefined') {
+        showError('Babel failed to load from CDN');
+        return;
+      }
+      if (typeof React === 'undefined' || typeof ReactDOM === 'undefined') {
+        showError('React/ReactDOM failed to load from CDN');
+        return;
+      }
+
+      // Destructure React hooks/APIs so they work after import stripping
+      var jsxCode = \`
+        var { useState, useEffect, useRef, useCallback, useMemo, useContext, useReducer, Fragment, createContext, forwardRef, memo, lazy, Suspense } = React;
+
+        // React Router shims
+        var BrowserRouter = function(p) { return p.children; };
+        var Router = BrowserRouter;
+        var HashRouter = BrowserRouter;
+        var Switch = function(p) {
+          var arr = React.Children.toArray(p.children);
+          if (arr.length === 0) return null;
+          var first = arr[0];
+          return first.props.element || first.props.children || (first.props.component ? React.createElement(first.props.component) : null);
+        };
+        var Routes = Switch;
+        var Route = function(p) { return p.element || (p.component ? React.createElement(p.component) : p.children) || null; };
+        var Redirect = function() { return null; };
+        var NavLink = function(p) { return React.createElement('a', { href: p.href || p.to || '#', className: p.className, onClick: function(e) { e.preventDefault(); } }, p.children); };
+
+        // Next.js shims
+        var Link = function(p) {
+          var target = p.href || p.to || '#';
+          return React.createElement('a', Object.assign({}, p, { href: target, onClick: function(e) { e.preventDefault(); }, to: undefined, legacyBehavior: undefined }), p.children);
+        };
+        var Image = function(p) {
+          return React.createElement('img', {
+            src: p.src || '', alt: p.alt || '', width: p.width, height: p.height,
+            className: p.className,
+            style: p.fill ? { objectFit: 'cover', width: '100%', height: '100%' } : undefined,
+            onError: function(e) { e.target.style.background = '#e5e7eb'; }
+          });
+        };
+        var useRouter = function() { return { pathname: '/', query: {}, push: function(){}, back: function(){}, replace: function(){} }; };
+        var useSearchParams = function() { return [new URLSearchParams(), function(){}]; };
+        var usePathname = function() { return '/'; };
+        var useParams = function() { return {}; };
+        var useNavigate = function() { return function(){}; };
+        var useLocation = function() { return { pathname: '/', search: '', hash: '' }; };
+        var Outlet = function() { return null; };
+
+        // Icon library shim: any unknown capitalized component becomes a span
+        var _iconHandler = { get: function(t, name) { return function(props) { return React.createElement('span', props); }; } };
+        var LucideIcons = typeof Proxy !== 'undefined' ? new Proxy({}, _iconHandler) : {};
+
+        ${escapeForScript(allCode)}
+      \`;
+
+      // Append render code (uses plain JS, no JSX)
+      jsxCode += \`
+        try {
+          var _root = ReactDOM.createRoot(document.getElementById('root'));
+          var _el = ${escapeForScript(renderExpr)};
+          if (_el) {
+            _root.render(_el);
+          } else {
+            document.getElementById('root').innerHTML = '<div style="padding:2rem;text-align:center;color:#666">No renderable component found</div>';
+          }
+        } catch(_renderErr) {
+          showError('Render: ' + _renderErr.message + String.fromCharCode(10) + _renderErr.stack);
+        }
+      \`;
+
+      try {
+        var output = Babel.transform(jsxCode, {
+          presets: ['react'],
+          filename: 'preview.jsx'
+        });
+        try {
+          (new Function(output.code))();
+        } catch (evalErr) {
+          showError('Runtime error: ' + evalErr.message + String.fromCharCode(10) + evalErr.stack);
+        }
+      } catch (babelErr) {
+        showError('JSX compilation error: ' + babelErr.message);
+      }
+    });
+  <\/script>
+</body>
+</html>`;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileList, refreshKey]);
+
+  const handleRefresh = () => setRefreshKey((k) => k + 1);
+
+  // Toolbar for preview modes
+  const renderToolbar = (label, extra) => (
+    <div className="flex items-center gap-2 border-b border-gray-100 bg-gray-50 px-4 py-2">
+      <div className="flex gap-1">
+        <span className="h-2.5 w-2.5 rounded-full bg-red-400" />
+        <span className="h-2.5 w-2.5 rounded-full bg-yellow-400" />
+        <span className="h-2.5 w-2.5 rounded-full bg-green-400" />
+      </div>
+      <div className="flex-1 rounded-md bg-white px-3 py-1 text-xs text-gray-400 truncate border border-gray-200">
+        {label}
+      </div>
+      <button
+        onClick={handleRefresh}
+        className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-600"
+        title="Refresh preview"
+      >
+        <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+        </svg>
+      </button>
+      {extra}
+    </div>
+  );
+
+  // If there's a deployment URL, show deployed version
+  if (deployUrl) {
     return (
-      <div className="flex h-full flex-col items-center justify-center p-8 text-center">
-        <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-gray-100">
-          <svg className="h-7 w-7 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
-          </svg>
-        </div>
-        <h3 className="mb-1.5 text-sm font-semibold text-gray-700">No deployment yet</h3>
-        <p className="max-w-xs text-xs text-gray-400">
-          Deploy your app to see a live preview. Build it first by chatting with the AI.
-        </p>
+      <div className="flex h-full flex-col">
+        {renderToolbar(deployUrl, (
+          <a
+            href={deployUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-600"
+            title="Open in new tab"
+          >
+            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+            </svg>
+          </a>
+        ))}
+        <iframe
+          key={refreshKey}
+          src={deployUrl}
+          title="App Preview"
+          className="flex-1 border-0"
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+        />
       </div>
     );
   }
 
-  return (
-    <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b border-gray-100 bg-gray-50 px-4 py-2">
-        <div className="flex gap-1">
-          <span className="h-2.5 w-2.5 rounded-full bg-red-400" />
-          <span className="h-2.5 w-2.5 rounded-full bg-yellow-400" />
-          <span className="h-2.5 w-2.5 rounded-full bg-green-400" />
-        </div>
-        <div className="flex-1 rounded-md bg-white px-3 py-1 text-xs text-gray-400 truncate border border-gray-200">
-          {url}
-        </div>
-        <a
-          href={url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-600"
-          title="Open in new tab"
-        >
-          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-          </svg>
-        </a>
+  // In-browser preview from generated files
+  if (previewHtml) {
+    return (
+      <div className="flex h-full flex-col">
+        {renderToolbar('In-browser preview', (
+          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+            Preview
+          </span>
+        ))}
+        <iframe
+          key={refreshKey}
+          srcDoc={previewHtml}
+          title="App Preview"
+          className="flex-1 border-0"
+          sandbox="allow-scripts allow-same-origin"
+        />
       </div>
-      <iframe
-        src={url}
-        title="App Preview"
-        className="flex-1 border-0"
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-      />
+    );
+  }
+
+  // No files yet
+  return (
+    <div className="flex h-full flex-col items-center justify-center p-8 text-center">
+      <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-gray-100">
+        <svg className="h-7 w-7 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+        </svg>
+      </div>
+      <h3 className="mb-1.5 text-sm font-semibold text-gray-700">No preview available</h3>
+      <p className="max-w-xs text-xs text-gray-400">
+        Start chatting with the AI to build your app. A preview will appear here once files are generated.
+      </p>
     </div>
   );
 }

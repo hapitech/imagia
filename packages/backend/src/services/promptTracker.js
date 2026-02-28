@@ -12,13 +12,15 @@ class PromptTracker {
    * @param {string} options.userId - User who triggered the call
    * @param {string} options.taskType - Task type (e.g. 'code-generation')
    * @param {string} [options.correlationId] - Request correlation ID
+   * @param {string} [options.prompt] - The prompt text sent to the LLM
+   * @param {string} [options.systemMessage] - The system message sent to the LLM
    * @param {Function} options.callFn - Async function that performs the LLM call
    * @returns {Promise<{...result, promptLogId: string}>}
    */
   async track(options) {
-    const { projectId, userId, taskType, correlationId, callFn } = options;
+    const { projectId, userId, taskType, correlationId, prompt, systemMessage, callFn } = options;
 
-    // Create initial prompt_log entry
+    // Create initial prompt_log entry with the actual prompt text
     let promptLogId;
     try {
       const [logEntry] = await db('prompt_logs')
@@ -27,6 +29,10 @@ class PromptTracker {
           user_id: userId,
           task_type: taskType,
           correlation_id: correlationId || null,
+          provider: 'pending',
+          model: 'pending',
+          prompt: prompt || 'pending',
+          system_message: systemMessage || null,
           status: 'pending',
           created_at: db.fn.now(),
         })
@@ -68,14 +74,13 @@ class PromptTracker {
             .update({
               status: 'success',
               model: result.model,
-              provider: result.provider || null,
+              provider: result.provider || 'unknown',
               input_tokens: result.usage?.inputTokens || 0,
               output_tokens: result.usage?.outputTokens || 0,
               total_tokens: result.usage?.totalTokens || 0,
-              cost_usd: cost.totalCost,
+              total_cost: cost.totalCost,
               latency_ms: latencyMs,
-              response_preview: (result.content || '').substring(0, 500),
-              updated_at: db.fn.now(),
+              response: (result.content || '').substring(0, 2000),
             });
         } catch (updateError) {
           logger.error('Failed to update prompt_log with success', {
@@ -111,7 +116,6 @@ class PromptTracker {
               status: 'error',
               error_message: error.message,
               latency_ms: latencyMs,
-              updated_at: db.fn.now(),
             });
         } catch (updateError) {
           logger.error('Failed to update prompt_log with error', {
