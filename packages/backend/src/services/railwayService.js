@@ -130,12 +130,33 @@ class RailwayService {
   }
 
   /**
-   * Deploy code to a Railway service from a GitHub repo or source upload.
-   * For Imagia, we create a temporary GitHub repo and connect it, or use
-   * the Railway source upload if available.
-   *
-   * For now, we use the serviceInstanceDeploy approach with a Dockerfile
-   * that the builder has already generated.
+   * Get the production environment ID for a Railway project.
+   * Needed for redeployments where we already have the project/service IDs.
+   */
+  async getEnvironmentId(railwayProjectId) {
+    const result = await this._query(
+      `query($projectId: String!) {
+        project(id: $projectId) {
+          environments {
+            edges {
+              node { id name }
+            }
+          }
+        }
+      }`,
+      { projectId: railwayProjectId }
+    );
+
+    const envEdges = result.project?.environments?.edges || [];
+    const prodEnv = envEdges.find((e) => e.node.name === 'production') || envEdges[0];
+    return prodEnv?.node?.id || null;
+  }
+
+  /**
+   * @deprecated Use railwayCliService.deploy() for source deploys.
+   * This method only works when Railway already has source connected
+   * (via GitHub or prior `railway up`). It triggers a redeploy, not
+   * an initial source upload.
    */
   async deployFromSource(railwayProjectId, serviceId, environmentId) {
     const result = await this._query(

@@ -13,9 +13,12 @@ const deployQueue = require('../deployQueue');
 const { db } = require('../../config/database');
 const logger = require('../../config/logger');
 const railwayService = require('../../services/railwayService');
+const railwayCliService = require('../../services/railwayCliService');
+const githubService = require('../../services/githubService');
 const cloudflareService = require('../../services/cloudflareService');
 const progressEmitter = require('../progressEmitter');
 const { decrypt } = require('../../utils/encryption');
+const { generateDockerfile, generateDockerignore } = require('../../utils/dockerfileGenerator');
 const costTracker = require('../../services/costTracker');
 const marketingQueue = require('../marketingQueue');
 
@@ -91,8 +94,7 @@ deployQueue.process(async (job) => {
       });
     } else {
       // Fetch environmentId from existing project
-      const status = await railwayService.getServiceStatus(railwayProjectId, railwayServiceId);
-      environmentId = status.environmentId;
+      environmentId = await railwayService.getEnvironmentId(railwayProjectId);
     }
 
     await db('deployments').where({ id: deploymentId }).update({
@@ -124,29 +126,85 @@ deployQueue.process(async (job) => {
       }
     }
 
-    // ---- Stage 4: Deploy (40-60%) ----
-    await emitProgress(projectId, 45, 'deploying', 'Deploying application...');
+    // ---- Stage 4a: Ensure Dockerfile exists (40-42%) ----
+    await emitProgress(projectId, 42, 'deploying', 'Preparing source code...');
 
-    // Check if project has a connected GitHub repo
+    const existingDockerfile = await db('project_files')
+      .where({ project_id: projectId, file_path: 'Dockerfile' })
+      .first();
+
+    if (!existingDockerfile) {
+      const dockerfileContent = generateDockerfile(project.app_type);
+      const dockerignoreContent = generateDockerignore();
+      await db('project_files').insert([
+        {
+          project_id: projectId,
+          file_path: 'Dockerfile',
+          content: dockerfileContent,
+          language: 'dockerfile',
+          file_size: Buffer.byteLength(dockerfileContent, 'utf-8'),
+        },
+        {
+          project_id: projectId,
+          file_path: '.dockerignore',
+          content: dockerignoreContent,
+          language: 'plaintext',
+          file_size: Buffer.byteLength(dockerignoreContent, 'utf-8'),
+        },
+      ]);
+      logger.info('Generated Dockerfile for deploy', { projectId, appType: project.app_type });
+    }
+
+    // ---- Stage 4b: Deploy code (42-60%) ----
     const githubConnection = await db('github_connections')
       .where({ project_id: projectId })
       .first();
 
+    const isFirstDeploy = !project.deployment_url;
+
     if (githubConnection) {
-      // Deploy via GitHub connection
-      await railwayService.connectGitHubRepo(
-        railwayProjectId,
-        railwayServiceId,
-        githubConnection.repo_full_name,
-        githubConnection.default_branch
-      );
+      // ---- GitHub Deploy Path ----
+      // Push latest code to GitHub first (ensures Railway deploys current code)
+      await emitProgress(projectId, 45, 'deploying', 'Pushing latest code to GitHub...');
+      try {
+        await githubService.pushToGitHub(userId, projectId, 'Deploy from Imagia');
+        logger.info('Pushed latest code to GitHub before deploy', {
+          projectId,
+          repo: githubConnection.repo_full_name,
+        });
+      } catch (pushError) {
+        logger.error('Failed to push to GitHub before deploy', {
+          projectId,
+          error: pushError.message,
+        });
+        throw new Error(`Failed to push code to GitHub: ${pushError.message}`);
+      }
+
+      if (isFirstDeploy) {
+        // First deploy: connect Railway to the GitHub repo
+        await emitProgress(projectId, 50, 'deploying', 'Connecting Railway to GitHub...');
+        await railwayService.connectGitHubRepo(
+          railwayProjectId,
+          railwayServiceId,
+          githubConnection.repo_full_name,
+          githubConnection.default_branch
+        );
+      } else {
+        // Redeploy: push already triggered Railway auto-redeploy
+        await emitProgress(projectId, 50, 'deploying', 'GitHub push triggered Railway rebuild...');
+      }
     } else {
-      // Trigger deploy from source
-      await railwayService.deployFromSource(
+      // ---- Direct Railway CLI Deploy Path ----
+      await emitProgress(projectId, 45, 'deploying', 'Uploading source to Railway...');
+      await railwayCliService.deploy({
+        projectId,
         railwayProjectId,
         railwayServiceId,
-        environmentId
-      );
+        environmentId,
+        appType: project.app_type,
+        onProgress: (msg) => emitProgress(projectId, 55, 'deploying', msg),
+      });
+      logger.info('Railway CLI deploy completed', { projectId });
     }
 
     await db('deployments').where({ id: deploymentId }).update({
@@ -290,6 +348,29 @@ deployQueue.process(async (job) => {
       error: error.message,
       stack: error.stack,
     });
+
+    // Clean up stale KV entry if this was a first deploy that failed after
+    // Stage 5 wrote the subdomain mapping
+    if (!project.deployment_url) {
+      try {
+        const staleDomain = await db('project_domains')
+          .where({ project_id: projectId, domain_type: 'subdomain' })
+          .first();
+        if (staleDomain && staleDomain.subdomain_slug) {
+          await cloudflareService.deleteKvEntry(staleDomain.subdomain_slug);
+          await db('project_domains').where({ id: staleDomain.id }).delete();
+          logger.info('Cleaned up stale KV entry after deploy failure', {
+            projectId,
+            slug: staleDomain.subdomain_slug,
+          });
+        }
+      } catch (cleanupError) {
+        logger.warn('Failed to clean up KV entry after deploy failure', {
+          projectId,
+          error: cleanupError.message,
+        });
+      }
+    }
 
     await db('deployments').where({ id: deploymentId }).update({
       status: 'failed',
