@@ -27,6 +27,7 @@ const marketingRoutes = require('./routes/marketing');
 const socialRoutes = require('./routes/social');
 const domainRoutes = require('./routes/domains');
 const modelRoutes = require('./routes/models');
+const waitlistRoutes = require('./routes/waitlist');
 
 const app = express();
 
@@ -120,6 +121,7 @@ app.use('/api/marketing', marketingRoutes);
 app.use('/api/social', socialRoutes);
 app.use('/api/domains', domainRoutes);
 app.use('/api/models', modelRoutes);
+app.use('/api/waitlist', waitlistRoutes);
 
 // In production, serve the frontend SPA from the built dist/ folder
 if (config.isProduction) {

@@ -313,4 +313,21 @@ export function validateSocialContent(content, platform) {
   return api.post('/social/validate', { content, platform }).then((r) => r.data);
 }
 
+// ----- Waitlist -----
+export function joinWaitlist(data) {
+  return api.post('/waitlist', data).then((r) => r.data);
+}
+
+export function getWaitlistEntries(params) {
+  return api.get('/waitlist', { params }).then((r) => r.data);
+}
+
+export function updateWaitlistEntry(id, data) {
+  return api.patch(`/waitlist/${id}`, data).then((r) => r.data);
+}
+
+export function deleteWaitlistEntry(id) {
+  return api.delete(`/waitlist/${id}`).then((r) => r.data);
+}
+
 export default api;

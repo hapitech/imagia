@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import { UserButton } from '@clerk/clerk-react';
+import { UserButton, useUser } from '@clerk/clerk-react';
 import useAuth from '../../hooks/useAuth';
 import useIsMobile from '../../hooks/useIsMobile';
+
+const ADMIN_EMAIL = 'ben@hapi.vc';
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: DashboardIcon },
@@ -14,9 +16,15 @@ const navItems = [
 
 export default function Layout() {
   useAuth(); // Wires up Clerk token getter for API requests
+  const { user } = useUser();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const isMobile = useIsMobile();
+
+  const isAdmin = user?.primaryEmailAddress?.emailAddress === ADMIN_EMAIL;
+  const allNavItems = isAdmin
+    ? [...navItems, { to: '/admin/waitlist', label: 'Waitlist', icon: WaitlistIcon }]
+    : navItems;
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -74,7 +82,7 @@ export default function Layout() {
 
         {/* Nav links */}
         <nav className="mt-4 flex-1 space-y-1 px-2">
-          {navItems.map(({ to, label, icon: Icon }) => (
+          {allNavItems.map(({ to, label, icon: Icon }) => (
             <NavLink
               key={to}
               to={to}
@@ -204,6 +212,19 @@ function SettingsIcon({ className }) {
         strokeLinejoin="round"
         strokeWidth={2}
         d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+      />
+    </svg>
+  );
+}
+
+function WaitlistIcon({ className }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={2}
+        d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"
       />
     </svg>
   );

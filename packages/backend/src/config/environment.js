@@ -72,6 +72,16 @@ const config = {
   facebookAppSecret: process.env.FACEBOOK_APP_SECRET,
   socialOauthCallbackUrl: process.env.SOCIAL_OAUTH_CALLBACK_URL,
 
+  // SMTP (email)
+  smtpHost: process.env.SMTP_HOST,
+  smtpPort: parseInt(process.env.SMTP_PORT, 10) || 587,
+  smtpUser: process.env.SMTP_USER,
+  smtpPass: process.env.SMTP_PASS,
+  smtpFrom: process.env.SMTP_FROM,
+
+  // Admin
+  adminEmail: process.env.ADMIN_EMAIL || 'ben@hapi.vc',
+
   // Logging
   logLevel: process.env.LOG_LEVEL || 'info',
 };
