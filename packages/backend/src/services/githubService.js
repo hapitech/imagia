@@ -127,6 +127,13 @@ class GitHubService {
 
     const defaultBranch = repoInfo.data.default_branch;
 
+    // Reject empty repos (no commits → GitHub returns 409 on tree fetch)
+    if (repoInfo.data.size === 0) {
+      const err = new Error(`Repository ${repoFullName} is empty. Push at least one commit before importing.`);
+      err.statusCode = 422;
+      throw err;
+    }
+
     // Get the full file tree
     const treeResult = await retryWithBackoff(
       () =>

@@ -113,6 +113,9 @@ router.post('/import', validate(importSchema), async (req, res, next) => {
     if (err.message.includes('not connected')) {
       return res.status(403).json({ error: err.message });
     }
+    if (err.statusCode === 422 || err.message.includes('is empty') || err.message.includes('circuit breaker')) {
+      return res.status(err.statusCode || 422).json({ error: err.message });
+    }
     next(err);
   }
 });
