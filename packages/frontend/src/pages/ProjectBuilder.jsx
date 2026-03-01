@@ -1693,20 +1693,17 @@ function PreviewTab({ project, files }) {
         const pkg = JSON.parse(pkgFile.content);
         const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
         // Built-in shims we handle ourselves — don't fetch from esm.sh
-        const shimmed = new Set(['react', 'react-dom', 'next', 'next/link', 'next/image', 'next/navigation', 'next/router']);
+        // Packages we handle via CDN or shims — skip from esm.sh import map
+        const shimmed = new Set([
+          'react', 'react-dom', 'next', 'next/link', 'next/image', 'next/navigation', 'next/router',
+          'tailwindcss', // loaded via cdn.tailwindcss.com script tag
+        ]);
         for (const [name, version] of Object.entries(deps)) {
           if (shimmed.has(name)) continue;
-          // Clean version (strip ^, ~, >=, etc.)
           const cleanVer = version.replace(/^[\^~>=<]+/, '');
           const esmUrl = `https://esm.sh/${name}@${cleanVer}?deps=react@18,react-dom@18`;
           imports[name] = esmUrl;
-          // Also map subpath imports (e.g. "lucide-react/dist/...")
           imports[name + '/'] = `https://esm.sh/${name}@${cleanVer}&deps=react@18,react-dom@18/`;
-          // If the package has CSS (common UI libs), add a link
-          const cssPackages = ['tailwindcss', '@tailwindcss/typography'];
-          if (cssPackages.includes(name)) {
-            cssLinks.push(`https://esm.sh/${name}@${cleanVer}?css`);
-          }
         }
       } catch { /* ignore parse errors */ }
     }

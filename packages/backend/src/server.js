@@ -69,7 +69,7 @@ app.use(helmet({
         "'self'",
         "https://*.clerk.accounts.dev", "https://api.clerk.com", "https://clerk.imagia.net",
         "https://cloudflareinsights.com",
-        "https://esm.sh", "https://cdn.esm.sh",
+        "https://esm.sh", "https://cdn.esm.sh", "https://cdn.jsdelivr.net",
       ],
       frameSrc: ["'self'", "https://*.clerk.accounts.dev", "https://accounts.imagia.net", "blob:"],
       imgSrc: ["'self'", "data:", "https://*.clerk.com", "https://img.clerk.com", "https://*.imagia.net", "https:"],
