@@ -28,7 +28,6 @@ export default function Dashboard() {
   // GitHub import state
   const [ghStep, setGhStep] = useState('loading'); // loading | connect | repos | importing
   const [ghRepos, setGhRepos] = useState([]);
-  const [ghPage, setGhPage] = useState(1);
   const [ghSearch, setGhSearch] = useState('');
   const [ghLoading, setGhLoading] = useState(false);
   const [ghError, setGhError] = useState(null);
@@ -81,13 +80,21 @@ export default function Dashboard() {
     setGhSelected(null);
     setGhCustomName('');
     setGhSearch('');
-    setGhPage(1);
 
-    // Try loading repos to see if GitHub is connected
+    // Load all repos by paginating through all pages
     try {
       setGhLoading(true);
-      const data = await githubListRepos({ page: 1, per_page: 30 });
-      setGhRepos(data.repos || []);
+      const allRepos = [];
+      let page = 1;
+      const perPage = 100;
+      while (true) {
+        const data = await githubListRepos({ page, per_page: perPage });
+        const repos = data.repos || [];
+        allRepos.push(...repos);
+        if (repos.length < perPage) break; // Last page
+        page++;
+      }
+      setGhRepos(allRepos);
       setGhStep('repos');
     } catch (err) {
       if (err.response?.status === 403) {
@@ -96,23 +103,6 @@ export default function Dashboard() {
         setGhError(err.response?.data?.error || 'Failed to load repos');
         setGhStep('connect');
       }
-    } finally {
-      setGhLoading(false);
-    }
-  }
-
-  async function loadMoreRepos() {
-    try {
-      setGhLoading(true);
-      const nextPage = ghPage + 1;
-      const data = await githubListRepos({ page: nextPage, per_page: 30 });
-      const newRepos = data.repos || [];
-      if (newRepos.length > 0) {
-        setGhRepos((prev) => [...prev, ...newRepos]);
-        setGhPage(nextPage);
-      }
-    } catch (err) {
-      setGhError('Failed to load more repos');
     } finally {
       setGhLoading(false);
     }
@@ -448,19 +438,6 @@ export default function Dashboard() {
                       ))
                     )}
                   </div>
-
-                  {/* Load more */}
-                  {!ghSearch && ghRepos.length >= ghPage * 30 && (
-                    <div className="mt-3 text-center">
-                      <button
-                        onClick={loadMoreRepos}
-                        disabled={ghLoading}
-                        className="text-sm font-medium text-primary hover:text-primary/80 disabled:opacity-50"
-                      >
-                        {ghLoading ? 'Loading...' : 'Load more repos'}
-                      </button>
-                    </div>
-                  )}
 
                   {/* Selected repo - custom name */}
                   {ghSelected && (
