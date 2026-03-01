@@ -1746,19 +1746,29 @@ function PreviewTab({ project, files }) {
     // Rewrite imports: convert relative imports to inline refs, keep npm imports for import map
     const rewriteImports = (code, name) => {
       let c = code;
-      // Remove TypeScript type imports entirely
+      // Remove TypeScript type imports and type-only exports
       c = c.replace(/^import\s+type\s+.*$/gm, '');
+      c = c.replace(/^export\s+type\s+.*$/gm, '');
+      // Remove TypeScript interface/type/enum/namespace declarations
+      c = c.replace(/^(export\s+)?(interface|type|enum|namespace|declare)\s+\w+[\s\S]*?(?=\n(?:import|export|const|let|var|function|class|\/\/|\/\*|$))/gm, '');
+      // Strip TypeScript type annotations (simplified)
+      c = c.replace(/:\s*[A-Z]\w+(?:<[^>]*>)?(\[\])?\s*(?=[=;,)\]}])/g, ' ');
+      c = c.replace(/<[A-Z]\w+(?:\s*,\s*[A-Z]\w+)*>/g, '');
       // Remove CSS/SCSS/style imports (handled separately)
       c = c.replace(/^import\s+['"].*\.(css|scss|sass|less)['"];?\s*$/gm, '');
+      // Strip CommonJS require() — not usable in browser
+      c = c.replace(/^.*require\s*\(.*\).*$/gm, '');
+      c = c.replace(/^module\.exports\s*=.*$/gm, '');
       // Convert relative imports to destructured refs (these are our own components)
-      // e.g. import Foo from './Foo' → /* resolved: Foo */
-      // e.g. import { Bar } from '../components/Bar' → /* resolved: Bar */
-      c = c.replace(/^import\s+.*from\s+['"]\.\.?\/.*['"];?\s*$/gm, '/* local import resolved */');
-      // Convert "export default function Foo" → "function Foo"
-      c = c.replace(/^export\s+default\s+function\s+/gm, 'function ');
+      c = c.replace(/^import\s+.*from\s+['"]\.\.?\/.*['"];?\s*$/gm, '');
+      // Convert "export default function Foo" → "function <name>" (use file-derived name)
+      c = c.replace(/^export\s+default\s+function\s+\w+/gm, `function ${name}`);
+      c = c.replace(/^export\s+default\s+function\s*(?=\()/gm, `function ${name}`);
+      // Convert "export default class Foo" → "function <name>" wrapper
+      c = c.replace(/^export\s+default\s+class\s+\w+/gm, `var ${name} = class ${name}`);
       // Convert "export default" → "const Name ="
-      c = c.replace(/^export\s+default\s+/gm, `const ${name} = `);
-      // Convert named exports → const
+      c = c.replace(/^export\s+default\s+/gm, `var ${name} = `);
+      // Convert named exports → strip export keyword
       c = c.replace(/^export\s+(const|let|var|function|class)\s+/gm, '$1 ');
       c = c.replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
       return c;
@@ -1829,8 +1839,8 @@ function PreviewTab({ project, files }) {
       return lines.join('\n      ');
     });
 
-    // Collect ALL JS/JSX/TS/TSX files as potential components
-    // Skip config files, test files, and entry points that just mount
+    // Collect JS/JSX/TS/TSX files as potential React components
+    // Aggressively filter out backend, config, and non-component files
     const skipPatterns = [
       /node_modules\//,
       /\.(test|spec|stories|d)\.(js|jsx|ts|tsx)$/,
@@ -1840,9 +1850,24 @@ function PreviewTab({ project, files }) {
       /package\.json$/,
       /README/i,
       /LICENSE/i,
+      // Backend / server directories
+      /\b(server|api|routes|controllers|middleware|models|migrations|seeds|db|prisma|knex|scripts|workers|queues|cron)\b\//i,
+      // Common backend files
+      /\b(server|app|index)\.(js|ts)$/, // plain .js/.ts entry files are likely backend
     ];
     const entryFilePatterns = [
       /^(src\/)?(main|index)\.(jsx|tsx|js|ts)$/,
+    ];
+
+    // Content patterns that indicate a file is backend/Node.js, not a React component
+    const backendContentPatterns = [
+      /\brequire\s*\(/,
+      /\bmodule\.exports\b/,
+      /\bexpress\s*\(\)/,
+      /\bmongoose\b/,
+      /\bnew\s+Router\b/,
+      /\bapp\.(get|post|put|patch|delete|use)\s*\(/,
+      /\bprocess\.env\b/,
     ];
 
     const collected = new Map();
@@ -1855,6 +1880,8 @@ function PreviewTab({ project, files }) {
       if (skipPatterns.some(p => p.test(path))) continue;
       // Skip entry files that just mount (e.g. main.jsx, index.js)
       if (entryFilePatterns.some(p => p.test(path))) continue;
+      // Skip files that look like backend/Node.js code
+      if (backendContentPatterns.some(p => p.test(f.content))) continue;
 
       const name = toIdentifier(path);
       if (!name) continue;
@@ -2019,7 +2046,7 @@ function PreviewTab({ project, files }) {
       // Icon/library fallbacks — Proxy returns stub components for unknown imports
       const _iconProxy = typeof Proxy !== 'undefined' ? new Proxy({}, { get: (_, name) => (props) => React.createElement('span', props) }) : {};
 
-      // Step 3: Babel-transform user JSX → plain JS, then eval
+      // Step 3: Babel-transform user JSX/TSX → plain JS, then eval
       if (typeof Babel === 'undefined') { showError('Babel failed to load'); return; }
 
       const jsxCode = \`${escapeForScript(allComponentCode)}\`;
@@ -2029,7 +2056,10 @@ function PreviewTab({ project, files }) {
 
       var _transformedCode;
       try {
-        _transformedCode = Babel.transform(jsxCode, { presets: ['react'], filename: 'preview.jsx' }).code;
+        _transformedCode = Babel.transform(jsxCode, {
+          presets: ['react', ['typescript', { allExtensions: true, isTSX: true }]],
+          filename: 'preview.tsx',
+        }).code;
         console.log('[Preview] Babel transform OK, output length:', _transformedCode.length);
       } catch (babelErr) {
         showError('Babel transform failed: ' + babelErr.message);
@@ -2037,13 +2067,14 @@ function PreviewTab({ project, files }) {
       }
 
       try {
+        // Strip "use strict" — it scopes var declarations to eval, preventing global leaking
+        var _evalCode = _transformedCode.replace(/^"use strict";?\s*/gm, '');
         // Convert top-level const/let to var so they create true global bindings
-        // (const/let in eval are scoped to the eval call and vanish when it returns)
-        var _evalCode = _transformedCode.replace(/^(const|let) /gm, 'var ');
+        _evalCode = _evalCode.replace(/^(const|let) /gm, 'var ');
         // Append window exports INSIDE the eval so vars are still in scope
         _evalCode += ';${windowExportCode}';
         (0, eval)(_evalCode);
-        console.log('[Preview] Eval OK');
+        console.log('[Preview] Eval OK, window exports:', ${JSON.stringify(allNames)}.map(n => n + '=' + typeof window[n]).join(', '));
       } catch (evalErr) {
         showError('Code eval failed: ' + evalErr.message);
       }
