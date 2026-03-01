@@ -1857,30 +1857,26 @@ function PreviewTab({ project, files }) {
       /package\.json$/,
       /README/i,
       /LICENSE/i,
-      // Backend / server directories
-      /\b(server|api|routes|controllers|middleware|models|migrations|seeds|db|prisma|knex|scripts|workers|queues|cron)\b\//i,
-      // Common backend files
-      /\b(server|app|index)\.(js|ts)$/, // plain .js/.ts entry files are likely backend
+      // Backend / server directories (NOT routes/api/models — those are valid React conventions)
+      /\b(server|controllers|middleware|migrations|seeds|db|prisma|knex|cron)\b\//i,
+      // Common backend entry files (only server.js — app.js and index.js can be React components)
+      /\bserver\.(js|ts)$/,
     ];
     const entryFilePatterns = [
       /^(src\/)?(main|index)\.(jsx|tsx|js|ts)$/,
     ];
 
-    // Content patterns that indicate a file is backend/Node.js, not a React component
+    // Content patterns that indicate a file is backend/Node.js, not a React component.
+    // Conservative: only flag patterns that are unambiguously server-side.
+    // process.env is NOT checked here — rewriteImports strips it, and React apps use it too.
     const isBackendContent = (content) => {
-      // Normalize line endings for consistent matching
       const c = content.replace(/\r\n?/g, '\n');
-      // Check for Node.js / backend patterns
       if (/\brequire\s*\(/.test(c)) return true;
       if (/\bmodule\.exports\b/.test(c)) return true;
       if (/\bexports\.\w+\s*=/.test(c)) return true;
-      if (/\bexpress\s*\(/.test(c)) return true;
-      if (/\bmongoose\b/.test(c)) return true;
-      if (/\bnew\s+Router\b/.test(c)) return true;
-      if (/\bapp\.(get|post|put|patch|delete|use)\s*\(/.test(c)) return true;
-      if (/\bprocess\.env\b/.test(c)) return true;
-      if (/\b(knex|sequelize|prisma|typeorm)\b/i.test(c)) return true;
-      if (/\b(createServer|listen)\s*\(/.test(c)) return true;
+      if (/\bexpress\s*\(\s*\)/.test(c)) return true; // express() call specifically
+      if (/\bmongoose\.(connect|model|Schema)\b/.test(c)) return true; // mongoose API, not the word
+      if (/\bcreateServer\s*\(/.test(c)) return true;
       if (/^#!\//.test(c)) return true; // shebang
       return false;
     };
