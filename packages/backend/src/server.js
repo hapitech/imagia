@@ -59,11 +59,21 @@ app.use(helmet({
   contentSecurityPolicy: config.isProduction ? {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "https://*.clerk.accounts.dev", "https://clerk.imagia.net", "https://static.cloudflareinsights.com"],
-      connectSrc: ["'self'", "https://*.clerk.accounts.dev", "https://api.clerk.com", "https://clerk.imagia.net", "https://cloudflareinsights.com"],
-      frameSrc: ["'self'", "https://*.clerk.accounts.dev", "https://accounts.imagia.net"],
-      imgSrc: ["'self'", "data:", "https://*.clerk.com", "https://img.clerk.com", "https://*.imagia.net"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: [
+        "'self'", "'unsafe-inline'", "'unsafe-eval'",
+        "https://*.clerk.accounts.dev", "https://clerk.imagia.net",
+        "https://static.cloudflareinsights.com",
+        "https://cdn.jsdelivr.net", "https://cdn.tailwindcss.com", "https://esm.sh",
+      ],
+      connectSrc: [
+        "'self'",
+        "https://*.clerk.accounts.dev", "https://api.clerk.com", "https://clerk.imagia.net",
+        "https://cloudflareinsights.com",
+        "https://esm.sh", "https://cdn.esm.sh",
+      ],
+      frameSrc: ["'self'", "https://*.clerk.accounts.dev", "https://accounts.imagia.net", "blob:"],
+      imgSrc: ["'self'", "data:", "https://*.clerk.com", "https://img.clerk.com", "https://*.imagia.net", "https:"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://esm.sh", "https://cdn.esm.sh"],
       workerSrc: ["'self'", "blob:"],
       fontSrc: ["'self'", "data:"],
       upgradeInsecureRequests: [],
