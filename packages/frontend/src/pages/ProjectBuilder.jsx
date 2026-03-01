@@ -1746,31 +1746,24 @@ function PreviewTab({ project, files }) {
     // Rewrite imports: convert relative imports to inline refs, keep npm imports for import map
     const rewriteImports = (code, name) => {
       let c = code;
-      // Remove TypeScript type imports and type-only exports
-      c = c.replace(/^import\s+type\s+.*$/gm, '');
-      c = c.replace(/^export\s+type\s+.*$/gm, '');
-      // Remove TypeScript interface/type/enum/namespace declarations
-      c = c.replace(/^(export\s+)?(interface|type|enum|namespace|declare)\s+\w+[\s\S]*?(?=\n(?:import|export|const|let|var|function|class|\/\/|\/\*|$))/gm, '');
-      // Strip TypeScript type annotations (simplified)
-      c = c.replace(/:\s*[A-Z]\w+(?:<[^>]*>)?(\[\])?\s*(?=[=;,)\]}])/g, ' ');
-      c = c.replace(/<[A-Z]\w+(?:\s*,\s*[A-Z]\w+)*>/g, '');
-      // Remove CSS/SCSS/style imports (handled separately)
-      c = c.replace(/^import\s+['"].*\.(css|scss|sass|less)['"];?\s*$/gm, '');
+      // Remove ALL import statements (npm deps loaded via import map, locals resolved)
+      c = c.replace(/^import\s+.*$/gm, '');
       // Strip CommonJS require() — not usable in browser
       c = c.replace(/^.*require\s*\(.*\).*$/gm, '');
       c = c.replace(/^module\.exports\s*=.*$/gm, '');
-      // Convert relative imports to destructured refs (these are our own components)
-      c = c.replace(/^import\s+.*from\s+['"]\.\.?\/.*['"];?\s*$/gm, '');
-      // Convert "export default function Foo" → "function <name>" (use file-derived name)
+      // Convert all exports to use the file-derived name
       c = c.replace(/^export\s+default\s+function\s+\w+/gm, `function ${name}`);
       c = c.replace(/^export\s+default\s+function\s*(?=\()/gm, `function ${name}`);
-      // Convert "export default class Foo" → "function <name>" wrapper
       c = c.replace(/^export\s+default\s+class\s+\w+/gm, `var ${name} = class ${name}`);
-      // Convert "export default" → "const Name ="
       c = c.replace(/^export\s+default\s+/gm, `var ${name} = `);
-      // Convert named exports → strip export keyword
       c = c.replace(/^export\s+(const|let|var|function|class)\s+/gm, '$1 ');
       c = c.replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
+      // After all rewrites, ensure the file-derived name exists as a binding.
+      // If code defines a different top-level function/const, alias it.
+      const defMatch = c.match(/^(?:function|var|const|let)\s+([A-Z]\w*)/m);
+      if (defMatch && defMatch[1] !== name) {
+        c += `\nvar ${name} = ${defMatch[1]};`;
+      }
       return c;
     };
 
@@ -1882,6 +1875,11 @@ function PreviewTab({ project, files }) {
       if (entryFilePatterns.some(p => p.test(path))) continue;
       // Skip files that look like backend/Node.js code
       if (backendContentPatterns.some(p => p.test(f.content))) continue;
+      // Only include files that look like React components (contain JSX or React patterns)
+      const hasJSX = /<[A-Z]\w/.test(f.content) || /<[a-z]+[\s>]/.test(f.content);
+      const hasReactPatterns = /\b(useState|useEffect|useRef|useCallback|useMemo|React\.createElement|createContext|forwardRef)\b/.test(f.content);
+      const hasExportDefault = /\bexport\s+default\b/.test(f.content);
+      if (!hasJSX && !hasReactPatterns && !hasExportDefault) continue;
 
       const name = toIdentifier(path);
       if (!name) continue;
@@ -2073,10 +2071,12 @@ function PreviewTab({ project, files }) {
         _evalCode = _evalCode.replace(/^(const|let) /gm, 'var ');
         // Append window exports INSIDE the eval so vars are still in scope
         _evalCode += ';${windowExportCode}';
+        console.log('[Preview] Eval code:', _evalCode.substring(0, 500));
         (0, eval)(_evalCode);
         console.log('[Preview] Eval OK, window exports:', ${JSON.stringify(allNames)}.map(n => n + '=' + typeof window[n]).join(', '));
       } catch (evalErr) {
         showError('Code eval failed: ' + evalErr.message);
+        return;
       }
 
       // Step 4: Render the top-level component
