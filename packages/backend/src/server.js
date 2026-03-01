@@ -63,7 +63,8 @@ app.use(helmet({
         "'self'", "'unsafe-inline'", "'unsafe-eval'",
         "https://*.clerk.accounts.dev", "https://clerk.imagia.net",
         "https://static.cloudflareinsights.com",
-        "https://cdn.jsdelivr.net", "https://cdn.tailwindcss.com", "https://esm.sh",
+        "https://cdn.jsdelivr.net", "https://cdn.tailwindcss.com",
+        "https://esm.sh", "https://cdn.esm.sh",
       ],
       connectSrc: [
         "'self'",
