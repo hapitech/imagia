@@ -358,6 +358,21 @@ export default function ProjectBuilder() {
       .catch(() => {});
   }, []);
 
+  // ---- Forward preview iframe errors to backend logs --------------------------
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.data?.type === 'preview-error') {
+        fetch('/api/client-log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ level: 'error', message: e.data.error, context: { projectId, source: 'preview-iframe' } }),
+        }).catch(() => {});
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, [projectId]);
+
   // ---- Track build progress -------------------------------------------------
   useEffect(() => {
     if (progress > 0 && progress < 100) {
@@ -1998,6 +2013,7 @@ function PreviewTab({ project, files }) {
       var el = document.getElementById('err');
       el.style.display = 'block';
       el.textContent += msg + String.fromCharCode(10, 10);
+      try { window.parent.postMessage({ type: 'preview-error', error: String(msg).substring(0, 500) }, '*'); } catch(_){}
       if (!_rendered) {
         document.getElementById('timeout-msg').style.display = 'block';
         var ld = document.getElementById('loading');

@@ -133,6 +133,15 @@ app.use('/api/domains', domainRoutes);
 app.use('/api/models', modelRoutes);
 app.use('/api/waitlist', waitlistRoutes);
 
+// Lightweight client-side error logging (preview iframe errors, etc.)
+app.post('/api/client-log', (req, res) => {
+  const { level, message, context } = req.body || {};
+  if (message) {
+    logger.warn('[Client]', { level: level || 'error', message: String(message).substring(0, 1000), context });
+  }
+  res.status(204).end();
+});
+
 // In production, serve the frontend SPA from the built dist/ folder
 if (config.isProduction) {
   const frontendDist = path.resolve(__dirname, '../../frontend/dist');
