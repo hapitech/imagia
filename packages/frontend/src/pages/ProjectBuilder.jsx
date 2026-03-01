@@ -1737,7 +1737,10 @@ function PreviewTab({ project, files }) {
     // Helper: extract a valid JS identifier from a file path
     const toIdentifier = (path) => {
       const basename = path.split('/').pop();
-      return basename.replace(/\.(jsx|tsx|js|ts)$/, '').replace(/[^a-zA-Z0-9]/g, '');
+      let name = basename.replace(/\.(jsx|tsx|js|ts)$/, '').replace(/[^a-zA-Z0-9_$]/g, '');
+      // Ensure it starts with a letter/underscore (not a digit)
+      if (/^[0-9]/.test(name)) name = '_' + name;
+      return name;
     };
 
     // Rewrite imports: convert relative imports to inline refs, keep npm imports for import map
@@ -1909,8 +1912,9 @@ function PreviewTab({ project, files }) {
 
     const allComponentCode = [...componentScripts, ...pageScripts].join('\n\n');
     // Window exports appended AFTER Babel transform (raw JS, not JSX)
-    const allNames = [...new Set([...pageNames, ...[...collected.keys()]])];
-    const windowExports = allNames.map(n => `try { if (typeof ${n} !== 'undefined') window.${n} = ${n}; } catch(e) {}`).join('\n');
+    // Filter to valid JS identifiers only (e.g. "404" from 404.tsx would break `window.404 = 404`)
+    const validIdent = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
+    const allNames = [...new Set([...pageNames, ...[...collected.keys()]])].filter(n => validIdent.test(n));
 
     // Build render expression — use window.X since eval'd vars are scoped
     const renderExpr = homePage
@@ -1955,7 +1959,7 @@ function PreviewTab({ project, files }) {
     function showError(msg) {
       var el = document.getElementById('err');
       el.style.display = 'block';
-      el.textContent += msg + '\\n\\n';
+      el.textContent += msg + String.fromCharCode(10, 10);
       if (!_rendered) {
         document.getElementById('timeout-msg').style.display = 'block';
         var ld = document.getElementById('loading');
@@ -2038,10 +2042,8 @@ function PreviewTab({ project, files }) {
         showError('Code eval failed: ' + evalErr.message);
       }
 
-      // Expose component names on window (separate eval, after Babel code)
-      try {
-        ${allNames.map(n => `try { if (typeof ${n} !== 'undefined') window.${n} = ${n}; } catch(e) {}`).join('\n        ')}
-      } catch(e) {}
+      // Expose component names on window (after Babel code ran in global scope via indirect eval)
+      ${allNames.map(n => `try { window['${n}'] = ${n}; } catch(_e) {}`).join(' ')}
 
       // Step 4: Render the top-level component
       try {
@@ -2059,7 +2061,7 @@ function PreviewTab({ project, files }) {
         showError('Render error: ' + _re.message);
       }
     } catch (moduleErr) {
-      showError('Module: ' + moduleErr.message + '\\n' + (moduleErr.stack || ''));
+      showError('Module: ' + moduleErr.message + ' | ' + (moduleErr.stack || ''));
     }
   })();
   <\/script>
