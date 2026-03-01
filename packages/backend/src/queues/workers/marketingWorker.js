@@ -16,6 +16,7 @@ const progressEmitter = require('../progressEmitter');
 const screenshotService = require('../../services/screenshotService');
 const videoService = require('../../services/videoService');
 const llmRouter = require('../../services/llmRouter');
+const promptTracker = require('../../services/promptTracker');
 const costTracker = require('../../services/costTracker');
 const {
   buildLandingPagePrompt,
@@ -228,10 +229,17 @@ async function generateLandingPage(project) {
     []  // Screenshot URLs could be passed here
   );
 
-  const result = await llmRouter.route('landing-page', {
-    systemMessage: prompt.systemMessage,
+  const result = await promptTracker.track({
+    projectId: project.id,
+    userId: project.user_id,
+    taskType: 'landing-page',
     prompt: prompt.prompt,
-    maxTokens: 8000,
+    systemMessage: prompt.systemMessage,
+    callFn: () => llmRouter.route('landing-page', {
+      systemMessage: prompt.systemMessage,
+      prompt: prompt.prompt,
+      maxTokens: 8000,
+    }),
   });
 
   const [asset] = await db('marketing_assets')
@@ -260,11 +268,18 @@ async function generateSocialPosts(project) {
         platform
       );
 
-      const result = await llmRouter.route('social-copy', {
-        systemMessage: prompt.systemMessage,
+      const result = await promptTracker.track({
+        projectId: project.id,
+        userId: project.user_id,
+        taskType: 'social-copy',
         prompt: prompt.prompt,
-        responseFormat: 'json',
-        maxTokens: 2000,
+        systemMessage: prompt.systemMessage,
+        callFn: () => llmRouter.route('social-copy', {
+          systemMessage: prompt.systemMessage,
+          prompt: prompt.prompt,
+          responseFormat: 'json',
+          maxTokens: 2000,
+        }),
       });
 
       const [asset] = await db('marketing_assets')
@@ -302,11 +317,18 @@ async function generateAdCopy(project) {
         platform
       );
 
-      const result = await llmRouter.route('ad-copy', {
-        systemMessage: prompt.systemMessage,
+      const result = await promptTracker.track({
+        projectId: project.id,
+        userId: project.user_id,
+        taskType: 'ad-copy',
         prompt: prompt.prompt,
-        responseFormat: 'json',
-        maxTokens: 2000,
+        systemMessage: prompt.systemMessage,
+        callFn: () => llmRouter.route('ad-copy', {
+          systemMessage: prompt.systemMessage,
+          prompt: prompt.prompt,
+          responseFormat: 'json',
+          maxTokens: 2000,
+        }),
       });
 
       const [asset] = await db('marketing_assets')
@@ -344,11 +366,18 @@ async function generateEmailTemplates(project) {
         emailType
       );
 
-      const result = await llmRouter.route('email-template', {
-        systemMessage: prompt.systemMessage,
+      const result = await promptTracker.track({
+        projectId: project.id,
+        userId: project.user_id,
+        taskType: 'email-template',
         prompt: prompt.prompt,
-        responseFormat: 'json',
-        maxTokens: 4000,
+        systemMessage: prompt.systemMessage,
+        callFn: () => llmRouter.route('email-template', {
+          systemMessage: prompt.systemMessage,
+          prompt: prompt.prompt,
+          responseFormat: 'json',
+          maxTokens: 4000,
+        }),
       });
 
       const [asset] = await db('marketing_assets')

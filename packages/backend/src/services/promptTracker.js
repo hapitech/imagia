@@ -59,7 +59,7 @@ class PromptTracker {
       const latencyMs = Date.now() - startTime;
 
       // Estimate cost
-      const provider = llmRouter.getProvider(result.provider || 'anthropic');
+      const provider = llmRouter.getProvider(result.provider || 'openai');
       const cost = provider.estimateCost(
         result.usage?.inputTokens || 0,
         result.usage?.outputTokens || 0,

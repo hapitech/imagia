@@ -107,10 +107,11 @@ class LLMRouter {
 
     if (!route) {
       logger.warn('Unknown task type, defaulting to fireworks', { taskType });
-      return this._generateWithProvider('fireworks', {
+      const result = await this._generateWithProvider('fireworks', {
         ...genOptions,
         model: genOptions.model || 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct',
       });
+      return { ...result, provider: 'fireworks', fallbackUsed: false };
     }
 
     // Try primary provider
@@ -178,18 +179,15 @@ class LLMRouter {
 
     if (!providerName) {
       // Try to infer provider from model ID
-      if (modelId.startsWith('accounts/fireworks/')) {
-        return this._generateWithProvider('fireworks', { ...options, model: modelId });
-      }
-      if (modelId.startsWith('claude-')) {
-        return this._generateWithProvider('anthropic', { ...options, model: modelId });
-      }
-      if (modelId.startsWith('gpt-')) {
-        return this._generateWithProvider('openai', { ...options, model: modelId });
-      }
+      let inferred = 'fireworks';
+      if (modelId.startsWith('accounts/fireworks/')) inferred = 'fireworks';
+      else if (modelId.startsWith('claude-')) inferred = 'anthropic';
+      else if (modelId.startsWith('gpt-')) inferred = 'openai';
+      else if (modelId.startsWith('deepseek-')) inferred = 'fireworks';
+      else logger.warn('Unknown model override, using fireworks default', { modelId });
 
-      logger.warn('Unknown model override, using fireworks default', { modelId });
-      return this._generateWithProvider('fireworks', options);
+      const result = await this._generateWithProvider(inferred, { ...options, model: modelId });
+      return { ...result, provider: inferred, fallbackUsed: false };
     }
 
     const result = await this._generateWithProvider(providerName, {

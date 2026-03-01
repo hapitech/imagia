@@ -21,6 +21,7 @@ import {
   addCustomDomain,
   removeProjectDomain,
   getDomainStatus,
+  updateProject,
 } from '../services/api';
 
 // ---------------------------------------------------------------------------
@@ -309,7 +310,7 @@ export default function ProjectBuilder() {
       try {
         setLoading(true);
         const proj = await getProject(projectId);
-        if (!cancelled) setProject(proj);
+        if (!cancelled) setProject(proj.project || proj);
 
         const [fileData, secretData, domainData] = await Promise.all([
           getProjectFiles(projectId).catch(() => []),
@@ -1152,7 +1153,7 @@ export default function ProjectBuilder() {
             { key: 'preview', label: 'Preview' },
             { key: 'files', label: 'Files' },
             { key: 'secrets', label: 'Secrets' },
-            { key: 'domains', label: 'Domains' },
+            { key: 'settings', label: 'Settings' },
           ].map(({ key, label }) => (
             <button
               key={key}
@@ -1172,11 +1173,6 @@ export default function ProjectBuilder() {
               {key === 'secrets' && secrets.length > 0 && (
                 <span className="ml-1.5 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-gray-100 px-1.5 text-[10px] font-semibold text-gray-500">
                   {secrets.length}
-                </span>
-              )}
-              {key === 'domains' && domains.length > 0 && (
-                <span className="ml-1.5 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-gray-100 px-1.5 text-[10px] font-semibold text-gray-500">
-                  {domains.length}
                 </span>
               )}
               {activeTab === key && (
@@ -1211,13 +1207,17 @@ export default function ProjectBuilder() {
               onAddDetected={handleAddDetectedSecret}
             />
           )}
-          {activeTab === 'domains' && (
-            <DomainsTab
+          {activeTab === 'settings' && (
+            <SettingsTab
+              project={project}
+              onUpdateProject={async (updates) => {
+                const result = await updateProject(projectId, updates);
+                setProject(result.project || result);
+              }}
               domains={domains}
               onAddDomain={handleAddDomain}
               onRemoveDomain={handleRemoveDomain}
               onRefreshStatus={handleRefreshDomainStatus}
-              deploymentUrl={project?.deployment_url}
             />
           )}
         </div>
@@ -1704,28 +1704,70 @@ function PreviewTab({ project, files }) {
       return c;
     };
 
-    // Collect all npm imports from all files for the module preamble
-    const npmImports = new Map(); // 'package' → Set of import statements
+    // Collect all npm imports from all files — parse into structured data
+    // so we can generate dynamic import() calls instead of static imports
+    const npmImportEntries = []; // { pkg, defaultName, namedImports: ['a','b'], namespaceImport: 'ns' }
+    const seenImports = new Set(); // dedup
     for (const f of fileList) {
       const content = f.content || '';
-      // Match: import ... from 'package-name' (not relative)
-      const importRegex = /^(import\s+.*from\s+['"])([^.'"][^'"]*?)(['"];?\s*)$/gm;
+      const importRegex = /^import\s+(.*?)\s+from\s+['"]([^.'"][^'"]*?)['"];?\s*$/gm;
       let m;
       while ((m = importRegex.exec(content)) !== null) {
+        const clause = m[1].trim();
         const pkg = m[2];
-        // Skip relative imports and CSS
         if (pkg.startsWith('.') || /\.(css|scss|sass|less)$/.test(pkg)) continue;
-        const fullImport = m[1] + pkg + m[3];
-        if (!npmImports.has(pkg)) npmImports.set(pkg, new Set());
-        npmImports.get(pkg).add(fullImport.trim());
+        // Skip react/react-dom — loaded separately
+        if (pkg === 'react' || pkg === 'react-dom' || pkg === 'react-dom/client') continue;
+        const key = `${clause}::${pkg}`;
+        if (seenImports.has(key)) continue;
+        seenImports.add(key);
+
+        const entry = { pkg, defaultName: null, namedImports: [], namespaceImport: null };
+        // Parse: import * as ns from 'pkg'
+        const nsMatch = clause.match(/^\*\s+as\s+(\w+)$/);
+        if (nsMatch) { entry.namespaceImport = nsMatch[1]; npmImportEntries.push(entry); continue; }
+        // Parse: import { a, b as c } from 'pkg' OR import Default, { a, b } from 'pkg'
+        const parts = clause.replace(/\s+/g, ' ');
+        const braceMatch = parts.match(/\{([^}]*)\}/);
+        if (braceMatch) {
+          entry.namedImports = braceMatch[1].split(',').map(s => s.trim()).filter(Boolean);
+        }
+        const beforeBrace = parts.replace(/\{[^}]*\}/, '').replace(/,/g, '').trim();
+        if (beforeBrace) entry.defaultName = beforeBrace;
+        npmImportEntries.push(entry);
       }
     }
 
-    // Build deduplicated npm import block
-    const npmImportLines = [];
-    for (const [, stmts] of npmImports) {
-      for (const stmt of stmts) npmImportLines.push(stmt);
-    }
+    // Build dynamic import lines:
+    // const { named1, named2 } = await import('pkg').catch(() => ({}));
+    // const DefaultName = (await import('pkg').catch(() => ({}))).default || (await import('pkg').catch(() => ({})));
+    const dynamicImportLines = npmImportEntries.map(({ pkg, defaultName, namedImports, namespaceImport }) => {
+      const escapedPkg = pkg.replace(/'/g, "\\'");
+      if (namespaceImport) {
+        return `const ${namespaceImport} = await import('${escapedPkg}').catch(() => ({}));`;
+      }
+      const lines = [];
+      if (defaultName && namedImports.length > 0) {
+        lines.push(`const _mod_${defaultName} = await import('${escapedPkg}').catch(() => ({}));`);
+        lines.push(`const ${defaultName} = _mod_${defaultName}.default || _mod_${defaultName};`);
+        // Handle "as" aliases in named imports
+        const destructure = namedImports.map(n => {
+          const asMatch = n.match(/^(\w+)\s+as\s+(\w+)$/);
+          return asMatch ? `${asMatch[1]}: ${asMatch[2]}` : n;
+        }).join(', ');
+        lines.push(`const { ${destructure} } = _mod_${defaultName};`);
+      } else if (defaultName) {
+        lines.push(`const _mod_${defaultName} = await import('${escapedPkg}').catch(() => ({}));`);
+        lines.push(`const ${defaultName} = _mod_${defaultName}.default || _mod_${defaultName};`);
+      } else if (namedImports.length > 0) {
+        const destructure = namedImports.map(n => {
+          const asMatch = n.match(/^(\w+)\s+as\s+(\w+)$/);
+          return asMatch ? `${asMatch[1]}: ${asMatch[2]}` : n;
+        }).join(', ');
+        lines.push(`const { ${destructure} } = await import('${escapedPkg}').catch(() => ({}));`);
+      }
+      return lines.join('\n      ');
+    });
 
     // Collect ALL JS/JSX/TS/TSX files as potential components
     // Skip config files, test files, and entry points that just mount
@@ -1868,20 +1910,16 @@ function PreviewTab({ project, files }) {
     }, 15000);
   <\/script>
   <script type="module">
-    // Step 1: Import npm deps via import map (resolved by esm.sh)
-    try {
-      ${escapeForScript(npmImportLines.join('\n      '))}
-    } catch(e) {
-      // Some packages may fail - continue with what we have
-      console.warn('Some npm imports failed:', e.message);
-    }
-
-    // Step 2: Make React available globally + provide shims
-    window.React = (await import('react'));
-    window.ReactDOM = (await import('react-dom/client'));
+    // Step 1: Load React first (everything depends on it)
+    window.React = await import('react').catch(e => { showError('React load failed: ' + e.message); return {}; });
+    window.ReactDOM = await import('react-dom/client').catch(e => { showError('ReactDOM load failed: ' + e.message); return {}; });
     const React = window.React;
     const ReactDOM = window.ReactDOM;
+    if (!React.createElement) { showError('React failed to load from CDN'); throw new Error('no react'); }
     const { useState, useEffect, useRef, useCallback, useMemo, useContext, useReducer, Fragment, createContext, forwardRef, memo, lazy, Suspense } = React;
+
+    // Step 2: Import npm deps via dynamic import() — each can fail independently
+    ${escapeForScript(dynamicImportLines.join('\n    '))}
 
     // React Router shims (for projects using react-router)
     const _noop = () => {};
@@ -2622,182 +2660,234 @@ function SecretsTab({ secrets, newSecret, onNewSecretChange, onAddSecret, onDele
 
 // ---------- Domains Tab --------------------------------------------------------
 
-function DomainsTab({ domains, onAddDomain, onRemoveDomain, onRefreshStatus, deploymentUrl }) {
+function SettingsTab({ project, onUpdateProject, domains, onAddDomain, onRemoveDomain, onRefreshStatus }) {
+  const [name, setName] = useState(project?.name || '');
+  const [description, setDescription] = useState(project?.description || '');
+  const [appType, setAppType] = useState(project?.app_type || '');
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  // Domain state
   const [newDomain, setNewDomain] = useState('');
-  const [adding, setAdding] = useState(false);
-  const [error, setError] = useState('');
+  const [addingDomain, setAddingDomain] = useState(false);
+  const [domainError, setDomainError] = useState('');
   const [instructions, setInstructions] = useState(null);
   const [checkingId, setCheckingId] = useState(null);
 
-  async function handleAdd(e) {
+  useEffect(() => {
+    setName(project?.name || '');
+    setDescription(project?.description || '');
+    setAppType(project?.app_type || '');
+  }, [project?.id]);
+
+  async function handleSave(e) {
+    e.preventDefault();
+    setSaving(true);
+    setSaved(false);
+    try {
+      await onUpdateProject({ name: name.trim(), description: description.trim() });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch {
+      // handled upstream
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleAddDomain(e) {
     e.preventDefault();
     const domain = newDomain.trim().toLowerCase();
     if (!domain) return;
-    setAdding(true);
-    setError('');
+    setAddingDomain(true);
+    setDomainError('');
     setInstructions(null);
     try {
       const result = await onAddDomain(domain);
       setNewDomain('');
       if (result?.instructions) setInstructions(result.instructions);
     } catch (err) {
-      setError(err.response?.data?.error || err.message || 'Failed to add domain');
+      setDomainError(err.response?.data?.error || err.message || 'Failed to add domain');
     } finally {
-      setAdding(false);
+      setAddingDomain(false);
     }
   }
 
   async function handleCheckStatus(domainId) {
     setCheckingId(domainId);
-    try {
-      await onRefreshStatus(domainId);
-    } finally {
-      setCheckingId(null);
-    }
+    try { await onRefreshStatus(domainId); } finally { setCheckingId(null); }
   }
 
   const subdomains = domains.filter((d) => d.domain_type === 'subdomain');
   const customDomains = domains.filter((d) => d.domain_type === 'custom');
 
   return (
-    <div className="h-full overflow-y-auto p-5">
-      {/* Header */}
-      <div className="mb-4 flex items-center gap-2">
-        <svg className="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
-        </svg>
-        <h3 className="text-sm font-semibold text-gray-900">Domains</h3>
-      </div>
-
-      {/* Auto-assigned subdomain */}
-      {subdomains.length > 0 && (
-        <div className="mb-5">
-          <h4 className="mb-2 text-xs font-medium text-gray-500 uppercase tracking-wide">Auto-assigned</h4>
-          {subdomains.map((d) => (
-            <div key={d.id} className="flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3">
-              <div className="flex items-center gap-3">
-                <div className="flex h-8 w-8 items-center justify-center rounded-md bg-emerald-100">
-                  <svg className="h-4 w-4 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                  </svg>
-                </div>
-                <div>
-                  <a href={`https://${d.domain}`} target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-emerald-800 hover:underline">
-                    {d.domain}
-                  </a>
-                  <p className="text-[10px] text-emerald-600">SSL active</p>
-                </div>
-              </div>
-              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">Primary</span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* No domains yet */}
-      {domains.length === 0 && !deploymentUrl && (
-        <div className="mb-6 rounded-lg border border-dashed border-gray-200 p-6 text-center">
-          <svg className="mx-auto mb-2 h-6 w-6 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3" />
+    <div className="h-full overflow-y-auto p-5 space-y-6">
+      {/* ---- Project Settings ---- */}
+      <form onSubmit={handleSave} className="space-y-4">
+        <div className="flex items-center gap-2">
+          <svg className="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
           </svg>
-          <p className="text-xs text-gray-400">Deploy your app to get an automatic subdomain</p>
+          <h3 className="text-sm font-semibold text-gray-900">Project Settings</h3>
         </div>
-      )}
 
-      {/* Custom domains */}
-      {customDomains.length > 0 && (
-        <div className="mb-5">
-          <h4 className="mb-2 text-xs font-medium text-gray-500 uppercase tracking-wide">Custom domains</h4>
-          <ul className="space-y-2">
-            {customDomains.map((d) => (
-              <li key={d.id} className="group flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3 transition-colors hover:border-gray-300">
+        <div className="space-y-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-600">Name</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="My App"
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm placeholder-gray-400 transition-colors focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-600">Description</label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="What does this project do?"
+              rows={3}
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm placeholder-gray-400 transition-colors focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100 resize-none"
+            />
+          </div>
+          {appType && (
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-600">App Type</label>
+              <p className="rounded-lg border border-gray-100 bg-gray-50 px-3 py-2 text-sm text-gray-500">{appType}</p>
+            </div>
+          )}
+        </div>
+
+        <button
+          type="submit"
+          disabled={saving || (!name.trim())}
+          className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-indigo-700 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {saving ? 'Saving...' : saved ? 'Saved!' : 'Save Changes'}
+        </button>
+      </form>
+
+      <hr className="border-gray-200" />
+
+      {/* ---- Domains ---- */}
+      <div>
+        <div className="mb-4 flex items-center gap-2">
+          <svg className="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+          </svg>
+          <h3 className="text-sm font-semibold text-gray-900">Domains</h3>
+        </div>
+
+        {/* Auto-assigned subdomain */}
+        {subdomains.length > 0 && (
+          <div className="mb-4">
+            <h4 className="mb-2 text-xs font-medium text-gray-500 uppercase tracking-wide">Auto-assigned</h4>
+            {subdomains.map((d) => (
+              <div key={d.id} className="flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3">
                 <div className="flex items-center gap-3">
-                  <div className={`flex h-8 w-8 items-center justify-center rounded-md ${d.ssl_status === 'active' ? 'bg-emerald-100' : 'bg-amber-100'}`}>
-                    {d.ssl_status === 'active' ? (
-                      <svg className="h-4 w-4 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
-                    ) : (
-                      <svg className="h-4 w-4 text-amber-600 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6l4 2" />
-                      </svg>
-                    )}
+                  <div className="flex h-8 w-8 items-center justify-center rounded-md bg-emerald-100">
+                    <svg className="h-4 w-4 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
                   </div>
                   <div>
-                    <a href={`https://${d.domain}`} target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-gray-800 hover:underline">
-                      {d.domain}
-                    </a>
-                    <p className={`text-[10px] ${d.ssl_status === 'active' ? 'text-emerald-600' : 'text-amber-600'}`}>
-                      SSL {d.ssl_status}
-                    </p>
+                    <a href={`https://${d.domain}`} target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-emerald-800 hover:underline">{d.domain}</a>
+                    <p className="text-[10px] text-emerald-600">SSL active</p>
                   </div>
                 </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => handleCheckStatus(d.id)}
-                    disabled={checkingId === d.id}
-                    className="rounded-md p-1.5 text-gray-300 transition-all hover:bg-gray-100 hover:text-gray-600"
-                    title="Check SSL status"
-                  >
-                    <svg className={`h-4 w-4 ${checkingId === d.id ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                  </button>
-                  <button
-                    onClick={() => onRemoveDomain(d.id)}
-                    className="rounded-md p-1.5 text-gray-300 opacity-0 transition-all hover:bg-red-50 hover:text-red-500 group-hover:opacity-100"
-                    title="Remove domain"
-                  >
-                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                  </button>
-                </div>
-              </li>
+                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">Primary</span>
+              </div>
             ))}
-          </ul>
-        </div>
-      )}
-
-      {/* CNAME instructions banner */}
-      {instructions && (
-        <div className="mb-5 rounded-lg bg-blue-50 p-3">
-          <p className="mb-1 text-xs font-medium text-blue-800">{instructions.message}</p>
-          <div className="rounded bg-blue-100 px-3 py-2 font-mono text-xs text-blue-700">
-            {instructions.record_type} {instructions.record_name} &rarr; {instructions.record_value}
           </div>
-          <button onClick={() => setInstructions(null)} className="mt-2 text-[10px] text-blue-600 hover:underline">Dismiss</button>
-        </div>
-      )}
+        )}
 
-      {/* Error */}
-      {error && (
-        <div className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">{error}</div>
-      )}
+        {/* No domains yet */}
+        {domains.length === 0 && !project?.deployment_url && (
+          <div className="mb-4 rounded-lg border border-dashed border-gray-200 p-6 text-center">
+            <svg className="mx-auto mb-2 h-6 w-6 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3" />
+            </svg>
+            <p className="text-xs text-gray-400">Deploy your app to get an automatic subdomain</p>
+          </div>
+        )}
 
-      {/* Add custom domain form */}
-      <form onSubmit={handleAdd} className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-        <h4 className="mb-3 text-xs font-semibold text-gray-700">Add a custom domain</h4>
-        <div className="space-y-2.5">
-          <input
-            type="text"
-            placeholder="app.yourdomain.com"
-            value={newDomain}
-            onChange={(e) => setNewDomain(e.target.value)}
-            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm placeholder-gray-400 transition-colors focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-          />
-          <p className="text-[10px] text-gray-400">
-            After adding, point a CNAME record from your domain to <span className="font-medium">imagia.net</span>
-          </p>
-          <button
-            type="submit"
-            disabled={!newDomain.trim() || adding}
-            className="w-full rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition-all hover:bg-indigo-700 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {adding ? 'Adding...' : 'Add Domain'}
-          </button>
-        </div>
-      </form>
+        {/* Custom domains */}
+        {customDomains.length > 0 && (
+          <div className="mb-4">
+            <h4 className="mb-2 text-xs font-medium text-gray-500 uppercase tracking-wide">Custom domains</h4>
+            <ul className="space-y-2">
+              {customDomains.map((d) => (
+                <li key={d.id} className="group flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3 transition-colors hover:border-gray-300">
+                  <div className="flex items-center gap-3">
+                    <div className={`flex h-8 w-8 items-center justify-center rounded-md ${d.ssl_status === 'active' ? 'bg-emerald-100' : 'bg-amber-100'}`}>
+                      {d.ssl_status === 'active' ? (
+                        <svg className="h-4 w-4 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                      ) : (
+                        <svg className="h-4 w-4 text-amber-600 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6l4 2" /></svg>
+                      )}
+                    </div>
+                    <div>
+                      <a href={`https://${d.domain}`} target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-gray-800 hover:underline">{d.domain}</a>
+                      <p className={`text-[10px] ${d.ssl_status === 'active' ? 'text-emerald-600' : 'text-amber-600'}`}>SSL {d.ssl_status}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => handleCheckStatus(d.id)} disabled={checkingId === d.id} className="rounded-md p-1.5 text-gray-300 transition-all hover:bg-gray-100 hover:text-gray-600" title="Check SSL status">
+                      <svg className={`h-4 w-4 ${checkingId === d.id ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                    </button>
+                    <button onClick={() => onRemoveDomain(d.id)} className="rounded-md p-1.5 text-gray-300 opacity-0 transition-all hover:bg-red-50 hover:text-red-500 group-hover:opacity-100" title="Remove domain">
+                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* CNAME instructions */}
+        {instructions && (
+          <div className="mb-4 rounded-lg bg-blue-50 p-3">
+            <p className="mb-1 text-xs font-medium text-blue-800">{instructions.message}</p>
+            <div className="rounded bg-blue-100 px-3 py-2 font-mono text-xs text-blue-700">
+              {instructions.record_type} {instructions.record_name} &rarr; {instructions.record_value}
+            </div>
+            <button onClick={() => setInstructions(null)} className="mt-2 text-[10px] text-blue-600 hover:underline">Dismiss</button>
+          </div>
+        )}
+
+        {domainError && (
+          <div className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">{domainError}</div>
+        )}
+
+        {/* Add custom domain form */}
+        <form onSubmit={handleAddDomain} className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+          <h4 className="mb-3 text-xs font-semibold text-gray-700">Add a custom domain</h4>
+          <div className="space-y-2.5">
+            <input
+              type="text"
+              placeholder="app.yourdomain.com"
+              value={newDomain}
+              onChange={(e) => setNewDomain(e.target.value)}
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm placeholder-gray-400 transition-colors focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+            />
+            <p className="text-[10px] text-gray-400">
+              After adding, point a CNAME record from your domain to <span className="font-medium">imagia.net</span>
+            </p>
+            <button
+              type="submit"
+              disabled={!newDomain.trim() || addingDomain}
+              className="w-full rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition-all hover:bg-indigo-700 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {addingDomain ? 'Adding...' : 'Add Domain'}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
