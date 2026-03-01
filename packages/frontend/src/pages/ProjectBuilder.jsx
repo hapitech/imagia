@@ -2032,11 +2032,16 @@ function PreviewTab({ project, files }) {
 
       try {
         // Use indirect eval (0,eval)() to run in global scope so vars are accessible
-        (0, eval)(_transformedCode + '\\n${escapeForScript(windowExports)}');
+        (0, eval)(_transformedCode);
         console.log('[Preview] Eval OK');
       } catch (evalErr) {
         showError('Code eval failed: ' + evalErr.message);
       }
+
+      // Expose component names on window (separate eval, after Babel code)
+      try {
+        ${allNames.map(n => `try { if (typeof ${n} !== 'undefined') window.${n} = ${n}; } catch(e) {}`).join('\n        ')}
+      } catch(e) {}
 
       // Step 4: Render the top-level component
       try {
