@@ -2,6 +2,20 @@ const CircuitBreaker = require('opossum');
 const config = require('../config/environment');
 const logger = require('../config/logger');
 
+/**
+ * Returns true if the error is a client error (4xx) that should NOT
+ * count as a circuit-breaker failure. The error still propagates to the
+ * caller, but it won't push the breaker toward the open state.
+ */
+function isClientError(error) {
+  // Axios errors
+  const status = error.response?.status || error.status || error.statusCode;
+  if (status && status >= 400 && status < 500) return true;
+  // OpenAI SDK errors carry a status property
+  if (error.constructor?.name === 'APIError' && error.status >= 400 && error.status < 500) return true;
+  return false;
+}
+
 function createCircuitBreaker(fn, name, options = {}) {
   const breaker = new CircuitBreaker(fn, {
     timeout: options.timeout || config.circuitBreakerTimeout,
@@ -10,6 +24,9 @@ function createCircuitBreaker(fn, name, options = {}) {
     volumeThreshold: options.volumeThreshold || 5,
     rollingCountTimeout: options.rollingCountTimeout || 30000,
     name,
+    // Don't count 4xx client errors as failures — they're not transient
+    // and shouldn't trip the breaker (e.g. 400 context overflow, 404 model not found)
+    errorFilter: (error) => isClientError(error),
   });
 
   breaker.on('open', () => {
@@ -33,7 +50,8 @@ function createCircuitBreaker(fn, name, options = {}) {
   });
 
   breaker.on('failure', (error) => {
-    logger.error(`Circuit breaker failure: ${name}`, { error: error.message });
+    const status = error.response?.status || error.status || error.statusCode;
+    logger.error(`Circuit breaker failure: ${name}`, { error: error.message, httpStatus: status || 'unknown' });
   });
 
   breaker.fallback(() => {

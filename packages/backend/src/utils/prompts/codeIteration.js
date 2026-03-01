@@ -149,9 +149,28 @@ function _buildRequirementsSummary(requirements) {
 }
 
 /**
+ * Rough char-to-token ratio. ~4 chars per token for English/code is a
+ * widely-used heuristic. We use it to stay under model context limits.
+ */
+const CHARS_PER_TOKEN = 4;
+
+/**
+ * Max input tokens to reserve for the current-files section.
+ * GPT-4o has 128k context. We leave ~20k for system prompt, user message,
+ * requirements summary, context.md, and the response format instructions,
+ * plus ~16k for max_tokens output → budget ≈ 90k tokens for files.
+ */
+const MAX_FILES_TOKENS = 90000;
+const MAX_FILES_CHARS = MAX_FILES_TOKENS * CHARS_PER_TOKEN; // ~360k chars
+
+/**
  * Build the full listing of current project files with their complete content.
- * Unlike the code-generation prompt (which truncates), iteration needs full
- * file contents so the LLM can produce complete replacement files.
+ * If the total content exceeds the character budget, files are prioritised by
+ * relevance and truncated:
+ *   1. Config files (package.json, index.html, etc.) — always included
+ *   2. Smaller source files — included in full
+ *   3. Larger source files — content truncated with a "…truncated" marker
+ *   4. If still over budget, remaining files listed as names only
  * @private
  */
 function _buildCurrentFilesSection(currentFiles) {
@@ -159,10 +178,54 @@ function _buildCurrentFilesSection(currentFiles) {
     return '(no files in project)';
   }
 
-  const sections = [];
+  // Sort: config/entry files first, then by size ascending (smaller = more likely to fit)
+  const CONFIG_PATTERNS = /^(package\.json|index\.html|vite\.config|tsconfig|tailwind\.config|postcss\.config|\.env)/i;
+  const sorted = [...currentFiles].sort((a, b) => {
+    const aConfig = CONFIG_PATTERNS.test(a.path.split('/').pop()) ? 0 : 1;
+    const bConfig = CONFIG_PATTERNS.test(b.path.split('/').pop()) ? 0 : 1;
+    if (aConfig !== bConfig) return aConfig - bConfig;
+    return (a.content || '').length - (b.content || '').length;
+  });
 
-  for (const file of currentFiles) {
-    sections.push(`=== ${file.path} ===\n${file.content || '(empty file)'}`);
+  const sections = [];
+  let charBudget = MAX_FILES_CHARS;
+  let truncatedCount = 0;
+  let skippedFiles = [];
+
+  for (const file of sorted) {
+    const content = file.content || '(empty file)';
+    const header = `=== ${file.path} ===\n`;
+    const fullEntry = header + content;
+
+    if (charBudget <= 0) {
+      // No budget left — just record the file name
+      skippedFiles.push(file.path);
+      continue;
+    }
+
+    if (fullEntry.length <= charBudget) {
+      // Fits entirely
+      sections.push(fullEntry);
+      charBudget -= fullEntry.length + 2; // +2 for join separator
+    } else if (charBudget > header.length + 200) {
+      // Partially fits — truncate content
+      const availableChars = charBudget - header.length - 60; // room for truncation marker
+      const truncatedContent = content.slice(0, Math.max(availableChars, 200));
+      sections.push(header + truncatedContent + '\n... (truncated — file has ' + content.length + ' chars)');
+      charBudget = 0;
+      truncatedCount++;
+    } else {
+      // Not enough room even for a truncated version
+      skippedFiles.push(file.path);
+    }
+  }
+
+  if (skippedFiles.length > 0 || truncatedCount > 0) {
+    let note = `\n\n[Note: ${currentFiles.length} total files in project.`;
+    if (truncatedCount > 0) note += ` ${truncatedCount} file(s) truncated.`;
+    if (skippedFiles.length > 0) note += ` ${skippedFiles.length} file(s) omitted for brevity: ${skippedFiles.join(', ')}`;
+    note += ' — Only modify files you can see in full above.]';
+    sections.push(note);
   }
 
   return sections.join('\n\n');
