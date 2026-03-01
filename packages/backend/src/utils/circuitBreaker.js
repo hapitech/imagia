@@ -40,7 +40,43 @@ function createCircuitBreaker(fn, name, options = {}) {
     throw new Error(`Service ${name} is currently unavailable (circuit breaker open)`);
   });
 
+  // Register for global access (enables admin reset)
+  _breakers.set(name, breaker);
+
   return breaker;
 }
 
-module.exports = { createCircuitBreaker };
+// Global registry for admin operations
+const _breakers = new Map();
+
+/**
+ * Get all registered circuit breakers and their status.
+ */
+function getCircuitBreakerStatus() {
+  const status = {};
+  for (const [name, breaker] of _breakers) {
+    status[name] = {
+      state: breaker.opened ? 'open' : breaker.halfOpen ? 'half-open' : 'closed',
+      stats: breaker.stats ? {
+        fires: breaker.stats.fires,
+        failures: breaker.stats.failures,
+        successes: breaker.stats.successes,
+        rejects: breaker.stats.rejects,
+        timeouts: breaker.stats.timeouts,
+      } : {},
+    };
+  }
+  return status;
+}
+
+/**
+ * Reset all circuit breakers to closed state.
+ */
+function resetAllCircuitBreakers() {
+  for (const [name, breaker] of _breakers) {
+    breaker.close();
+    logger.info(`Circuit breaker manually reset: ${name}`);
+  }
+}
+
+module.exports = { createCircuitBreaker, getCircuitBreakerStatus, resetAllCircuitBreakers };

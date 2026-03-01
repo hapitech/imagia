@@ -1,6 +1,7 @@
 const express = require('express');
 const { db } = require('../config/database');
 const { createRedisClient } = require('../config/redis');
+const { getCircuitBreakerStatus, resetAllCircuitBreakers } = require('../utils/circuitBreaker');
 
 const router = express.Router();
 
@@ -33,6 +34,17 @@ router.get('/', async (req, res) => {
     services,
     timestamp: new Date().toISOString(),
   });
+});
+
+// Circuit breaker status
+router.get('/circuit-breakers', (req, res) => {
+  res.json(getCircuitBreakerStatus());
+});
+
+// Reset all circuit breakers (emergency recovery)
+router.post('/circuit-breakers/reset', (req, res) => {
+  resetAllCircuitBreakers();
+  res.json({ message: 'All circuit breakers reset to closed', status: getCircuitBreakerStatus() });
 });
 
 module.exports = router;
