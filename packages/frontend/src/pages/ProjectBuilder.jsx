@@ -301,6 +301,19 @@ export default function ProjectBuilder() {
   const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
   const isMobile = useIsMobile();
 
+  // -- Toast notifications ---
+  const [toast, setToast] = useState(null); // { type: 'success'|'error'|'info', message, detail? }
+  const toastTimerRef = useRef(null);
+  function showToast(type, message, detail) {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToast({ type, message, detail });
+    toastTimerRef.current = setTimeout(() => setToast(null), type === 'error' ? 6000 : 4000);
+  }
+
+  // -- Git operation loading state ---
+  const [gitPushing, setGitPushing] = useState(false);
+  const [gitPulling, setGitPulling] = useState(false);
+
   // ---- Load project on mount ------------------------------------------------
   useEffect(() => {
     if (!projectId) return;
@@ -531,24 +544,29 @@ export default function ProjectBuilder() {
 
   // -- GitHub handlers --
   async function handleGitHubPush() {
+    setGitPushing(true);
     try {
       const result = await githubPush(projectId, 'Update from Imagia');
-      alert(`Code pushed! Commit: ${result.commit_sha?.slice(0, 7)}`);
+      showToast('success', 'Pushed to GitHub', `Commit ${result.commit_sha?.slice(0, 7) || ''}`);
       refreshGitHubStatus();
     } catch (err) {
-      alert(err.response?.data?.error || 'Push failed');
+      showToast('error', 'Push failed', err.response?.data?.error || err.message);
+    } finally {
+      setGitPushing(false);
     }
   }
 
   async function handleGitHubPull() {
+    setGitPulling(true);
     try {
       const result = await githubPull(projectId);
-      alert(`Pulled ${result.file_count} files from GitHub`);
-      // Refresh files
+      showToast('success', 'Pulled from GitHub', `${result.file_count} files updated`);
       const fileData = await getProjectFiles(projectId).catch(() => []);
       setFiles(Array.isArray(fileData) ? fileData : fileData.files || []);
     } catch (err) {
-      alert(err.response?.data?.error || 'Pull failed');
+      showToast('error', 'Pull failed', err.response?.data?.error || err.message);
+    } finally {
+      setGitPulling(false);
     }
   }
 
@@ -688,8 +706,8 @@ export default function ProjectBuilder() {
             <div className="flex gap-2 overflow-x-auto border-t border-gray-100 px-3 py-2">
               {project?.github_repo_url ? (
                 <>
-                  <button onClick={handleGitHubPush} className="flex-shrink-0 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600">Push</button>
-                  <button onClick={handleGitHubPull} className="flex-shrink-0 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600">Pull</button>
+                  <button onClick={handleGitHubPush} disabled={gitPushing} className="flex-shrink-0 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600 disabled:opacity-50">{gitPushing ? 'Pushing...' : 'Push'}</button>
+                  <button onClick={handleGitHubPull} disabled={gitPulling} className="flex-shrink-0 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600 disabled:opacity-50">{gitPulling ? 'Pulling...' : 'Pull'}</button>
                 </>
               ) : (
                 <button onClick={() => setShowGitHubModal(true)} className="flex-shrink-0 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600">GitHub</button>
@@ -872,17 +890,21 @@ export default function ProjectBuilder() {
               <div className="flex items-center gap-1">
                 <button
                   onClick={handleGitHubPush}
-                  className="rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50"
+                  disabled={gitPushing}
+                  className="flex items-center gap-1 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 disabled:opacity-50"
                   title="Push to GitHub"
                 >
-                  Push
+                  {gitPushing && <span className="h-3 w-3 animate-spin rounded-full border-2 border-gray-300 border-t-gray-600" />}
+                  {gitPushing ? 'Pushing...' : 'Push'}
                 </button>
                 <button
                   onClick={handleGitHubPull}
-                  className="rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50"
+                  disabled={gitPulling}
+                  className="flex items-center gap-1 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 disabled:opacity-50"
                   title="Pull from GitHub"
                 >
-                  Pull
+                  {gitPulling && <span className="h-3 w-3 animate-spin rounded-full border-2 border-gray-300 border-t-gray-600" />}
+                  {gitPulling ? 'Pulling...' : 'Pull'}
                 </button>
                 {githubStatus?.status && githubStatus.status !== 'not_connected' && (
                   <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
@@ -1235,6 +1257,44 @@ export default function ProjectBuilder() {
           onPrivateChange={setGitIsPrivate}
           projectName={project?.name}
         />
+      )}
+
+      {/* Toast notification */}
+      {toast && (
+        <div className="fixed bottom-4 right-4 z-50 animate-in slide-in-from-bottom-4 fade-in duration-200">
+          <div className={`flex items-start gap-3 rounded-xl border px-4 py-3 shadow-lg backdrop-blur-sm ${
+            toast.type === 'success' ? 'border-emerald-200 bg-emerald-50/95 text-emerald-800' :
+            toast.type === 'error' ? 'border-red-200 bg-red-50/95 text-red-800' :
+            'border-blue-200 bg-blue-50/95 text-blue-800'
+          }`}>
+            <div className="mt-0.5">
+              {toast.type === 'success' && (
+                <svg className="h-4 w-4 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              )}
+              {toast.type === 'error' && (
+                <svg className="h-4 w-4 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              )}
+              {toast.type === 'info' && (
+                <svg className="h-4 w-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              )}
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-medium">{toast.message}</p>
+              {toast.detail && <p className="mt-0.5 text-xs opacity-75">{toast.detail}</p>}
+            </div>
+            <button onClick={() => setToast(null)} className="ml-2 -mr-1 rounded-md p-0.5 opacity-50 hover:opacity-100">
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1891,6 +1951,7 @@ function PreviewTab({ project, files }) {
   <script>
     var _rendered = false;
     window.onerror = function(msg, src, line, col, err) { showError(err ? err.stack : msg); };
+    window.addEventListener('unhandledrejection', function(e) { showError('Unhandled: ' + (e.reason?.message || e.reason || 'unknown')); });
     function showError(msg) {
       var el = document.getElementById('err');
       el.style.display = 'block';
@@ -1910,73 +1971,77 @@ function PreviewTab({ project, files }) {
     }, 15000);
   <\/script>
   <script type="module">
-    // Step 1: Load React first (everything depends on it)
-    window.React = await import('react').catch(e => { showError('React load failed: ' + e.message); return {}; });
-    window.ReactDOM = await import('react-dom/client').catch(e => { showError('ReactDOM load failed: ' + e.message); return {}; });
-    const React = window.React;
-    const ReactDOM = window.ReactDOM;
-    if (!React.createElement) { showError('React failed to load from CDN'); throw new Error('no react'); }
-    const { useState, useEffect, useRef, useCallback, useMemo, useContext, useReducer, Fragment, createContext, forwardRef, memo, lazy, Suspense } = React;
-
-    // Step 2: Import npm deps via dynamic import() — each can fail independently
-    ${escapeForScript(dynamicImportLines.join('\n    '))}
-
-    // React Router shims (for projects using react-router)
-    const _noop = () => {};
-    const _noopNav = () => _noop;
-    const BrowserRouter = (p) => p.children;
-    const Router = BrowserRouter;
-    const HashRouter = BrowserRouter;
-    const Routes = (p) => {
-      const arr = React.Children.toArray(p.children);
-      if (!arr.length) return null;
-      const first = arr[0];
-      return first.props.element || first.props.children || null;
-    };
-    const Switch = Routes;
-    const Route = (p) => p.element || p.children || null;
-    const Redirect = () => null;
-    const NavLink = (p) => React.createElement('a', { href: p.to || '#', className: typeof p.className === 'function' ? p.className({ isActive: false }) : p.className, onClick: (e) => e.preventDefault() }, p.children);
-    const Outlet = () => null;
-    const useNavigate = _noopNav;
-    const useLocation = () => ({ pathname: '/', search: '', hash: '' });
-    const useParams = () => ({});
-    const useSearchParams = () => [new URLSearchParams(), _noop];
-
-    // Next.js shims
-    const Link = (p) => React.createElement('a', { ...p, href: p.href || p.to || '#', onClick: (e) => e.preventDefault(), to: undefined, legacyBehavior: undefined }, p.children);
-    const Image = (p) => React.createElement('img', { src: p.src || '', alt: p.alt || '', width: p.width, height: p.height, className: p.className, style: p.fill ? { objectFit: 'cover', width: '100%', height: '100%' } : undefined });
-    const useRouter = () => ({ pathname: '/', query: {}, push: _noop, back: _noop, replace: _noop });
-    const usePathname = () => '/';
-
-    // Icon library fallback
-    const _iconProxy = typeof Proxy !== 'undefined' ? new Proxy({}, { get: (_, name) => (props) => React.createElement('span', props) }) : {};
-
-    // Step 3: Babel-transform user JSX → plain JS, then eval
-    if (typeof Babel === 'undefined') { showError('Babel failed to load'); throw new Error('no babel'); }
-
-    const jsxCode = \`${escapeForScript(allComponentCode)}
-
-    // Render
+  // Wrap everything in async IIFE + try/catch — module-level errors are invisible to window.onerror
+  (async () => {
     try {
-      const _root = ReactDOM.createRoot(document.getElementById('root'));
-      const _el = ${escapeForScript(renderExpr)};
-      if (_el) {
-        window._rendered = true;
-        _root.render(_el);
-      } else {
-        document.getElementById('timeout-msg').style.display = 'block';
-        document.getElementById('loading').style.display = 'none';
+      // Step 1: Load React first
+      const _reactMod = await import('react').catch(e => { showError('React load failed: ' + e.message); return null; });
+      const _reactDomMod = await import('react-dom/client').catch(e => { showError('ReactDOM load failed: ' + e.message); return null; });
+      if (!_reactMod || !_reactMod.createElement) { showError('React failed to load from esm.sh CDN'); return; }
+      window.React = _reactMod;
+      window.ReactDOM = _reactDomMod || {};
+      const React = _reactMod;
+      const ReactDOM = _reactDomMod || {};
+      const { useState, useEffect, useRef, useCallback, useMemo, useContext, useReducer, Fragment, createContext, forwardRef, memo, lazy, Suspense } = React;
+
+      // Step 2: Import npm deps — each can fail independently
+      ${dynamicImportLines.join('\n      ')}
+
+      // React Router shims
+      const _noop = () => {};
+      const _noopNav = () => _noop;
+      const BrowserRouter = (p) => p.children;
+      const Router = BrowserRouter;
+      const HashRouter = BrowserRouter;
+      const Routes = (p) => { const arr = React.Children.toArray(p.children); return arr.length ? (arr[0].props.element || arr[0].props.children || null) : null; };
+      const Switch = Routes;
+      const Route = (p) => p.element || p.children || null;
+      const Redirect = () => null;
+      const NavLink = (p) => React.createElement('a', { href: p.to || '#', className: typeof p.className === 'function' ? p.className({ isActive: false }) : p.className, onClick: (e) => e.preventDefault() }, p.children);
+      const Outlet = () => null;
+      const useNavigate = _noopNav;
+      const useLocation = () => ({ pathname: '/', search: '', hash: '' });
+      const useParams = () => ({});
+      const useSearchParams = () => [new URLSearchParams(), _noop];
+
+      // Next.js shims
+      const Link = (p) => React.createElement('a', { ...p, href: p.href || p.to || '#', onClick: (e) => e.preventDefault(), to: undefined, legacyBehavior: undefined }, p.children);
+      const Image = (p) => React.createElement('img', { src: p.src || '', alt: p.alt || '', width: p.width, height: p.height, className: p.className, style: p.fill ? { objectFit: 'cover', width: '100%', height: '100%' } : undefined });
+      const useRouter = () => ({ pathname: '/', query: {}, push: _noop, back: _noop, replace: _noop });
+      const usePathname = () => '/';
+
+      // Icon/library fallbacks — Proxy returns stub components for unknown imports
+      const _iconProxy = typeof Proxy !== 'undefined' ? new Proxy({}, { get: (_, name) => (props) => React.createElement('span', props) }) : {};
+
+      // Step 3: Babel-transform user JSX → plain JS, then eval
+      if (typeof Babel === 'undefined') { showError('Babel failed to load'); return; }
+
+      const jsxCode = \`${escapeForScript(allComponentCode)}
+
+      // Render
+      try {
+        const _root = ReactDOM.createRoot(document.getElementById('root'));
+        const _el = ${escapeForScript(renderExpr)};
+        if (_el) {
+          window._rendered = true;
+          _root.render(_el);
+        } else {
+          document.getElementById('timeout-msg').style.display = 'block';
+          document.getElementById('loading').style.display = 'none';
+        }
+      } catch(_re) { showError('Render: ' + _re.message + '\\n' + _re.stack); }
+      \`;
+
+      try {
+        const output = Babel.transform(jsxCode, { presets: ['react'], filename: 'preview.jsx' });
+        eval(output.code);
+      } catch (babelErr) {
+        showError('Transform: ' + babelErr.message + '\\n' + (babelErr.stack || ''));
       }
-    } catch(_re) { showError('Render: ' + _re.message + '\\n' + _re.stack); }
-    \`;
-
-    try {
-      const output = Babel.transform(jsxCode, { presets: ['react'], filename: 'preview.jsx' });
-      eval(output.code);
-    } catch (err) {
-      showError(err.message + '\\n' + (err.stack || ''));
+    } catch (moduleErr) {
+      showError('Module: ' + moduleErr.message + '\\n' + (moduleErr.stack || ''));
     }
+  })();
   <\/script>
 </body>
 </html>`;
