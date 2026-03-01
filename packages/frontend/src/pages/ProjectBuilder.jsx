@@ -1943,8 +1943,8 @@ function PreviewTab({ project, files }) {
 </head>
 <body>
   <div id="root"><div id="loading"><div class="spinner"></div>Loading preview...</div></div>
+  <div id="err" style="display:none;padding:1rem;color:#dc2626;font-size:13px;font-family:monospace;white-space:pre-wrap;background:#fef2f2;border:2px solid #fca5a5;border-radius:8px;margin:1rem;max-height:40vh;overflow:auto"></div>
   <div id="timeout-msg"><h3>Preview not available</h3><p>This project may need to be deployed for a full preview.</p></div>
-  <div id="err" style="display:none;padding:1rem;color:#dc2626;font-size:13px;font-family:monospace;white-space:pre-wrap;background:#fef2f2;border-top:2px solid #dc2626;position:fixed;bottom:0;left:0;right:0;max-height:40vh;overflow:auto;z-index:9999"></div>
   <script>
     var _rendered = false;
     window.onerror = function(msg, src, line, col, err) { showError(err ? err.stack : msg); };
@@ -2015,33 +2015,39 @@ function PreviewTab({ project, files }) {
 
       const jsxCode = \`${escapeForScript(allComponentCode)}\`;
 
+      console.log('[Preview] JSX code length:', jsxCode.length, 'chars');
+      console.log('[Preview] Will try to render: ${homePage || pageNames[0] || 'none'}');
+
       var _transformedCode;
       try {
         _transformedCode = Babel.transform(jsxCode, { presets: ['react'], filename: 'preview.jsx' }).code;
+        console.log('[Preview] Babel transform OK, output length:', _transformedCode.length);
       } catch (babelErr) {
-        showError('Transform: ' + babelErr.message);
+        showError('Babel transform failed: ' + babelErr.message);
         return;
       }
 
       try {
         eval(_transformedCode);
+        console.log('[Preview] Eval OK');
       } catch (evalErr) {
-        showError('Eval: ' + evalErr.message);
+        showError('Code eval failed: ' + evalErr.message);
       }
 
       // Step 4: Render the top-level component
       try {
         const _root = ReactDOM.createRoot(document.getElementById('root'));
+        console.log('[Preview] Checking components:', ${JSON.stringify(pageNames)}.map(n => n + '=' + typeof eval(n)).join(', '));
         const _el = ${renderExpr};
         if (_el) {
           window._rendered = true;
           _root.render(_el);
+          console.log('[Preview] Rendered successfully');
         } else {
-          document.getElementById('timeout-msg').style.display = 'block';
-          document.getElementById('loading').style.display = 'none';
+          showError('No renderable component found. Available: ${pageNames.join(', ')}');
         }
       } catch(_re) {
-        showError('Render: ' + _re.message);
+        showError('Render error: ' + _re.message);
       }
     } catch (moduleErr) {
       showError('Module: ' + moduleErr.message + '\\n' + (moduleErr.stack || ''));
