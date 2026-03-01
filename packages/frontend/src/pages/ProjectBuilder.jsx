@@ -2016,12 +2016,26 @@ function PreviewTab({ project, files }) {
       // Step 3: Babel-transform user JSX → plain JS, then eval
       if (typeof Babel === 'undefined') { showError('Babel failed to load'); return; }
 
-      const jsxCode = \`${escapeForScript(allComponentCode)}
+      const jsxCode = \`${escapeForScript(allComponentCode)}\`;
 
-      // Render
+      var _transformedCode;
+      try {
+        _transformedCode = Babel.transform(jsxCode, { presets: ['react'], filename: 'preview.jsx' }).code;
+      } catch (babelErr) {
+        showError('Transform: ' + babelErr.message);
+        return;
+      }
+
+      try {
+        eval(_transformedCode);
+      } catch (evalErr) {
+        showError('Eval: ' + evalErr.message);
+      }
+
+      // Step 4: Render the top-level component
       try {
         const _root = ReactDOM.createRoot(document.getElementById('root'));
-        const _el = ${escapeForScript(renderExpr)};
+        const _el = ${renderExpr};
         if (_el) {
           window._rendered = true;
           _root.render(_el);
@@ -2029,14 +2043,8 @@ function PreviewTab({ project, files }) {
           document.getElementById('timeout-msg').style.display = 'block';
           document.getElementById('loading').style.display = 'none';
         }
-      } catch(_re) { showError('Render: ' + _re.message + '\\n' + _re.stack); }
-      \`;
-
-      try {
-        const output = Babel.transform(jsxCode, { presets: ['react'], filename: 'preview.jsx' });
-        eval(output.code);
-      } catch (babelErr) {
-        showError('Transform: ' + babelErr.message + '\\n' + (babelErr.stack || ''));
+      } catch(_re) {
+        showError('Render: ' + _re.message);
       }
     } catch (moduleErr) {
       showError('Module: ' + moduleErr.message + '\\n' + (moduleErr.stack || ''));
