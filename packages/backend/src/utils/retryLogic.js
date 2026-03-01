@@ -3,6 +3,11 @@ const logger = require('../config/logger');
 function isRetryableError(error) {
   if (!error) return false;
 
+  // Never retry circuit breaker open or missing config errors
+  if (error.message && (error.message.includes('circuit breaker') || error.message.includes('not configured'))) {
+    return false;
+  }
+
   // Network errors
   if (error.code === 'ECONNRESET' || error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
     return true;

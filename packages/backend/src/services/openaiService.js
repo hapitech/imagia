@@ -22,9 +22,12 @@ class OpenAIService {
     this.breaker = createCircuitBreaker(
       (params) => this._callApi(params),
       'openai-gpt',
-      { timeout: 60000 }
+      { timeout: 60000, errorThreshold: 75, resetTimeout: 30000, volumeThreshold: 5 }
     );
 
+    if (!config.openaiApiKey) {
+      logger.warn('OPENAI_API_KEY not set — OpenAI calls will fail');
+    }
     logger.info('OpenAIService initialized');
   }
 
@@ -48,6 +51,11 @@ class OpenAIService {
       temperature = 0.7,
       responseFormat = 'text',
     } = options;
+
+    // Fail fast if no API key (don't trip circuit breaker)
+    if (!config.openaiApiKey) {
+      throw new Error('OpenAI API key not configured. Set OPENAI_API_KEY environment variable.');
+    }
 
     // Check cache first
     const cacheKey = llmCacheKey(

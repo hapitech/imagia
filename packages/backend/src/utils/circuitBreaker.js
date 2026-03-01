@@ -7,6 +7,8 @@ function createCircuitBreaker(fn, name, options = {}) {
     timeout: options.timeout || config.circuitBreakerTimeout,
     errorThresholdPercentage: options.errorThreshold || config.circuitBreakerErrorThreshold,
     resetTimeout: options.resetTimeout || config.circuitBreakerResetTimeout,
+    volumeThreshold: options.volumeThreshold || 5,
+    rollingCountTimeout: options.rollingCountTimeout || 30000,
     name,
   });
 

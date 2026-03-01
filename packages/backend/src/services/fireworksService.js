@@ -27,9 +27,12 @@ class FireworksService {
     this.breaker = createCircuitBreaker(
       (params) => this._callApi(params),
       'fireworks-ai',
-      { timeout: 90000 }
+      { timeout: 90000, errorThreshold: 75, resetTimeout: 30000, volumeThreshold: 5 }
     );
 
+    if (!config.fireworksApiKey) {
+      logger.warn('FIREWORKS_API_KEY not set — Fireworks AI calls will fail');
+    }
     logger.info('FireworksService initialized');
   }
 
@@ -53,6 +56,11 @@ class FireworksService {
       temperature = 0.7,
       responseFormat = 'text',
     } = options;
+
+    // Fail fast if no API key (don't trip circuit breaker)
+    if (!config.fireworksApiKey) {
+      throw new Error('Fireworks API key not configured. Set FIREWORKS_API_KEY environment variable.');
+    }
 
     // Check cache first
     const cacheKey = llmCacheKey(
