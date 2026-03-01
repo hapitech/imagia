@@ -2116,7 +2116,7 @@ function PreviewTab({ project, files }) {
           srcDoc={previewHtml}
           title="App Preview"
           className="flex-1 border-0"
-          sandbox="allow-scripts allow-same-origin"
+          sandbox="allow-scripts allow-modals"
         />
       </div>
     );
