@@ -1907,13 +1907,16 @@ function PreviewTab({ project, files }) {
       .replace(/\$/g, '\\$')
       .replace(/<\/script>/gi, '<\\/script>');
 
-    const allComponentCode = [...componentScripts, ...pageScripts].join('\n\n');
+    // Expose all component names on window so they're accessible after eval()
+    const allNames = [...new Set([...pageNames, ...[...collected.keys()]])];
+    const windowExports = allNames.map(n => `if (typeof ${n} !== 'undefined') window.${n} = ${n};`).join('\n');
+    const allComponentCode = [...componentScripts, ...pageScripts, windowExports].join('\n\n');
 
-    // Build render expression
+    // Build render expression — use window.X since eval'd vars are scoped
     const renderExpr = homePage
-      ? `typeof ${homePage} === 'function' ? React.createElement(${homePage}) : null`
+      ? `typeof window.${homePage} === 'function' ? React.createElement(window.${homePage}) : null`
       : pageNames.length > 0
-        ? pageNames.map(n => `typeof ${n} === 'function' ? React.createElement(${n}) : null`).join(' || ') + ' || null'
+        ? pageNames.map(n => `typeof window.${n} === 'function' ? React.createElement(window.${n}) : null`).join(' || ') + ' || null'
         : 'null';
 
     // CSS links for deps
@@ -2037,7 +2040,7 @@ function PreviewTab({ project, files }) {
       // Step 4: Render the top-level component
       try {
         const _root = ReactDOM.createRoot(document.getElementById('root'));
-        console.log('[Preview] Checking components:', ${JSON.stringify(pageNames)}.map(n => n + '=' + typeof eval(n)).join(', '));
+        console.log('[Preview] Checking components:', ${JSON.stringify(pageNames)}.map(n => n + '=' + typeof window[n]).join(', '));
         const _el = ${renderExpr};
         if (_el) {
           window._rendered = true;
