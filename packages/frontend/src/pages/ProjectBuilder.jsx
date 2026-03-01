@@ -1886,29 +1886,31 @@ function PreviewTab({ project, files }) {
     };
 
     const collected = new Map();
+    const _debugSkipped = { noContent: 0, notJsx: 0, skipPattern: 0, entryFile: 0, backend: 0, noReact: 0, postRewrite: 0 };
+    const _debugPaths = [];
     for (const f of fileList) {
       const path = f.file_path || f.path || '';
-      if (!f.content) continue;
+      if (!f.content) { _debugSkipped.noContent++; continue; }
       // Only JS/JSX/TS/TSX files
-      if (!/\.(jsx|tsx|js|ts)$/.test(path)) continue;
+      if (!/\.(jsx|tsx|js|ts)$/.test(path)) { _debugSkipped.notJsx++; continue; }
       // Skip non-component files
-      if (skipPatterns.some(p => p.test(path))) continue;
+      if (skipPatterns.some(p => p.test(path))) { _debugSkipped.skipPattern++; _debugPaths.push('skip:' + path); continue; }
       // Skip entry files that just mount (e.g. main.jsx, index.js)
-      if (entryFilePatterns.some(p => p.test(path))) continue;
+      if (entryFilePatterns.some(p => p.test(path))) { _debugSkipped.entryFile++; _debugPaths.push('entry:' + path); continue; }
       // Skip files that look like backend/Node.js code
-      if (isBackendContent(f.content)) continue;
+      if (isBackendContent(f.content)) { _debugSkipped.backend++; _debugPaths.push('backend:' + path); continue; }
       // Only include files that look like React components (contain JSX or React patterns)
       const hasJSX = /<[A-Z]\w/.test(f.content) || /<[a-z]+[\s>]/.test(f.content);
       const hasReactPatterns = /\b(useState|useEffect|useRef|useCallback|useMemo|React\.createElement|createContext|forwardRef)\b/.test(f.content);
       const hasExportDefault = /\bexport\s+default\b/.test(f.content);
-      if (!hasJSX && !hasReactPatterns && !hasExportDefault) continue;
+      if (!hasJSX && !hasReactPatterns && !hasExportDefault) { _debugSkipped.noReact++; _debugPaths.push('noReact:' + path); continue; }
 
       const name = toIdentifier(path);
       if (!name) continue;
 
       const rewritten = rewriteImports(f.content, name);
       // Post-rewrite sanity check: if rewritten code still has Node.js patterns, skip
-      if (/\brequire\s*\(/.test(rewritten) || /\bmodule\.exports\b/.test(rewritten)) continue;
+      if (/\brequire\s*\(/.test(rewritten) || /\bmodule\.exports\b/.test(rewritten)) { _debugSkipped.postRewrite++; _debugPaths.push('postRewrite:' + path); continue; }
 
       // Determine if this is a "page" (entry-level component) or a supporting component
       const isPage = /\b(pages?|views?|screens?|routes?|app)\b/i.test(path)
@@ -1948,6 +1950,11 @@ function PreviewTab({ project, files }) {
       }
       componentScripts.length = 0;
     }
+
+    // Diagnostic logging for remote debugging
+    console.log('[Preview] Pipeline:', { totalFiles: fileList.length, collected: collected.size, pages: pageNames.length, components: componentScripts.length, skipped: _debugSkipped });
+    if (_debugPaths.length > 0) console.log('[Preview] Filtered paths:', _debugPaths.slice(0, 20));
+    if (pageNames.length > 0) console.log('[Preview] Pages:', pageNames, 'Components:', [...collected.keys()].filter(n => !pageNames.includes(n)));
 
     if (pageNames.length === 0) return null;
 
@@ -2156,6 +2163,20 @@ function PreviewTab({ project, files }) {
       {extra}
     </div>
   );
+
+  // Report preview state to backend for remote debugging (user may be on phone)
+  useEffect(() => {
+    const state = deployUrl ? 'deployed-url' : previewHtml ? 'in-browser' : fileList.length === 0 ? 'no-files' : 'no-renderable-components';
+    const info = { state, fileCount: fileList.length, deployUrl: deployUrl || null };
+    // Only log non-deployed states (deployed is expected to work)
+    if (state !== 'deployed-url') {
+      fetch('/api/client-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ level: 'info', message: `Preview state: ${state}`, context: { ...info, source: 'preview-tab' } }),
+      }).catch(() => {});
+    }
+  }, [deployUrl, previewHtml, fileList.length]);
 
   // If there's a deployment URL, show deployed version
   if (deployUrl) {
