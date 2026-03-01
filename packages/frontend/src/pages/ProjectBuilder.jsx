@@ -1907,10 +1907,10 @@ function PreviewTab({ project, files }) {
       .replace(/\$/g, '\\$')
       .replace(/<\/script>/gi, '<\\/script>');
 
-    // Expose all component names on window so they're accessible after eval()
+    const allComponentCode = [...componentScripts, ...pageScripts].join('\n\n');
+    // Window exports appended AFTER Babel transform (raw JS, not JSX)
     const allNames = [...new Set([...pageNames, ...[...collected.keys()]])];
-    const windowExports = allNames.map(n => `if (typeof ${n} !== 'undefined') window.${n} = ${n};`).join('\n');
-    const allComponentCode = [...componentScripts, ...pageScripts, windowExports].join('\n\n');
+    const windowExports = allNames.map(n => `try { if (typeof ${n} !== 'undefined') window.${n} = ${n}; } catch(e) {}`).join('\n');
 
     // Build render expression — use window.X since eval'd vars are scoped
     const renderExpr = homePage
@@ -2031,7 +2031,8 @@ function PreviewTab({ project, files }) {
       }
 
       try {
-        eval(_transformedCode);
+        // Use indirect eval (0,eval)() to run in global scope so vars are accessible
+        (0, eval)(_transformedCode + '\\n${escapeForScript(windowExports)}');
         console.log('[Preview] Eval OK');
       } catch (evalErr) {
         showError('Code eval failed: ' + evalErr.message);
