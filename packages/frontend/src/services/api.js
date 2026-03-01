@@ -21,12 +21,23 @@ api.interceptors.request.use(async (config) => {
   return config;
 });
 
-// Response interceptor: handle 401
+// Response interceptor: handle 401, retry 429
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error) => {
     if (error.response && error.response.status === 401) {
       window.location.href = '/sign-in';
+    }
+    // Auto-retry on 429 (rate limited) — up to 2 retries with backoff
+    if (error.response && error.response.status === 429) {
+      const config = error.config;
+      config._retryCount = config._retryCount || 0;
+      if (config._retryCount < 2) {
+        config._retryCount++;
+        const delay = (config._retryCount * 2000) + Math.random() * 1000;
+        await new Promise((r) => setTimeout(r, delay));
+        return api(config);
+      }
     }
     return Promise.reject(error);
   }
