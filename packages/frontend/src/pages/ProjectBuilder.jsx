@@ -1664,8 +1664,11 @@ function PreviewTab({ project, files }) {
       fileMap[path] = f.content || '';
     }
 
-    // Find CSS
-    const indexCss = fileMap['src/index.css'] || fileMap['src/globals.css'] || fileMap['src/app/globals.css'] || '';
+    // Find CSS — check many common locations
+    const cssKeys = Object.keys(fileMap).filter(k => /\.(css|scss)$/.test(k)).sort();
+    const primaryCssKey = ['src/index.css', 'src/globals.css', 'src/app/globals.css', 'src/styles/globals.css', 'styles/globals.css', 'app/globals.css', 'index.css', 'globals.css']
+      .find(k => fileMap[k]) || cssKeys[0] || '';
+    const indexCss = fileMap[primaryCssKey] || '';
 
     // Clean CSS for embedding
     const cleanCss = indexCss
@@ -1724,20 +1727,42 @@ function PreviewTab({ project, files }) {
       for (const stmt of stmts) npmImportLines.push(stmt);
     }
 
-    // Collect components (prefer .jsx version over extensionless duplicates)
+    // Collect ALL JS/JSX/TS/TSX files as potential components
+    // Skip config files, test files, and entry points that just mount
+    const skipPatterns = [
+      /node_modules\//,
+      /\.(test|spec|stories|d)\.(js|jsx|ts|tsx)$/,
+      /\.(config|setup)\.(js|ts|mjs|cjs)$/,
+      /(vite|webpack|babel|jest|tailwind|postcss|tsconfig|next)\./,
+      /\.env/,
+      /package\.json$/,
+      /README/i,
+      /LICENSE/i,
+    ];
+    const entryFilePatterns = [
+      /^(src\/)?(main|index)\.(jsx|tsx|js|ts)$/,
+    ];
+
     const collected = new Map();
     for (const f of fileList) {
       const path = f.file_path || f.path || '';
-      const isPage = path.startsWith('src/pages/') || path.startsWith('src/app/') || path.startsWith('app/');
-      const isComp = path.startsWith('src/components/') || path.startsWith('components/') || path.startsWith('src/lib/') || path.startsWith('lib/');
-      const isSrcRoot = /^src\/[^/]+\.(jsx|tsx|js|ts)$/.test(path) && !path.includes('main') && !path.includes('index') && !path.includes('vite');
-      if (!isPage && !isComp && !isSrcRoot) continue;
       if (!f.content) continue;
+      // Only JS/JSX/TS/TSX files
+      if (!/\.(jsx|tsx|js|ts)$/.test(path)) continue;
+      // Skip non-component files
+      if (skipPatterns.some(p => p.test(path))) continue;
+      // Skip entry files that just mount (e.g. main.jsx, index.js)
+      if (entryFilePatterns.some(p => p.test(path))) continue;
 
-      const hasExt = /\.(jsx|tsx|js|ts)$/.test(path);
       const name = toIdentifier(path);
       if (!name) continue;
 
+      // Determine if this is a "page" (entry-level component) or a supporting component
+      const isPage = /\b(pages?|views?|screens?|routes?|app)\b/i.test(path)
+        || /^(src\/)?App\.(jsx|tsx|js|ts)$/.test(path)
+        || /^(src\/)?[^/]+\.(jsx|tsx)$/.test(path); // root-level JSX files are likely pages
+
+      const hasExt = /\.(jsx|tsx)$/.test(path);
       const priority = hasExt ? 1 : 0;
       const existing = collected.get(name);
       if (existing && existing.priority >= priority) continue;
@@ -1762,10 +1787,19 @@ function PreviewTab({ project, files }) {
       }
     }
 
-    if (pageNames.length === 0 && componentScripts.length === 0) return null;
+    // If no pages found, promote all components to pages (best effort)
+    if (pageNames.length === 0 && componentScripts.length > 0) {
+      for (const [name, { code }] of collected) {
+        pageScripts.push(code);
+        pageNames.push(name);
+      }
+      componentScripts.length = 0;
+    }
 
-    // Find the best page to render
-    const homePage = ['App', 'Home', 'Index', 'Page', 'Main'].find(n => pageNames.includes(n)) || pageNames[0] || '';
+    if (pageNames.length === 0) return null;
+
+    // Find the best page to render — prefer App, then common page names
+    const homePage = ['App', 'Home', 'Index', 'Page', 'Main', 'Root', 'Layout', 'Dashboard'].find(n => pageNames.includes(n)) || pageNames[0] || '';
 
     // Escape for embedding in script
     const escapeForScript = (str) => str
