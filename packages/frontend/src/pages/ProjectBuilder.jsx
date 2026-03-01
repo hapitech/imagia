@@ -1911,10 +1911,11 @@ function PreviewTab({ project, files }) {
       .replace(/<\/script>/gi, '<\\/script>');
 
     const allComponentCode = [...componentScripts, ...pageScripts].join('\n\n');
-    // Window exports appended AFTER Babel transform (raw JS, not JSX)
     // Filter to valid JS identifiers only (e.g. "404" from 404.tsx would break `window.404 = 404`)
     const validIdent = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
     const allNames = [...new Set([...pageNames, ...[...collected.keys()]])].filter(n => validIdent.test(n));
+    // Window export code — must run INSIDE eval() because const/let in eval are scoped to the eval call
+    const windowExportCode = allNames.map(n => `try{window['${n}']=${n}}catch(_){}`).join(';');
 
     // Build render expression — use window.X since eval'd vars are scoped
     const renderExpr = homePage
@@ -2035,15 +2036,16 @@ function PreviewTab({ project, files }) {
       }
 
       try {
-        // Use indirect eval (0,eval)() to run in global scope so vars are accessible
-        (0, eval)(_transformedCode);
+        // Convert top-level const/let to var so they create true global bindings
+        // (const/let in eval are scoped to the eval call and vanish when it returns)
+        var _evalCode = _transformedCode.replace(/^(const|let) /gm, 'var ');
+        // Append window exports INSIDE the eval so vars are still in scope
+        _evalCode += ';${windowExportCode}';
+        (0, eval)(_evalCode);
         console.log('[Preview] Eval OK');
       } catch (evalErr) {
         showError('Code eval failed: ' + evalErr.message);
       }
-
-      // Expose component names on window (after Babel code ran in global scope via indirect eval)
-      ${allNames.map(n => `try { window['${n}'] = ${n}; } catch(_e) {}`).join(' ')}
 
       // Step 4: Render the top-level component
       try {
