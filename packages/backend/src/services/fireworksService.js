@@ -7,11 +7,14 @@ const config = require('../config/environment');
 const logger = require('../config/logger');
 
 const API_ENDPOINT = 'https://api.fireworks.ai/inference/v1/chat/completions';
-const DEFAULT_MODEL = 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct';
+const DEFAULT_MODEL = 'accounts/fireworks/models/kimi-k2p5';
 const REQUEST_TIMEOUT = 60000; // 60 seconds
 
 // Pricing per million tokens
 const PRICING = {
+  'accounts/fireworks/models/kimi-k2p5': { input: 0.60, output: 3.00 },
+  'accounts/fireworks/models/kimi-k2-instruct-0905': { input: 0.60, output: 2.50 },
+  'accounts/fireworks/models/kimi-k2-thinking': { input: 0.60, output: 2.50 },
   'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct': { input: 0.45, output: 1.80 },
   'accounts/fireworks/models/deepseek-v3': { input: 0.56, output: 1.68 },
   'accounts/fireworks/models/llama-v3p3-70b-instruct': { input: 0.90, output: 0.90 },

@@ -7,28 +7,28 @@ const logger = require('../config/logger');
 /**
  * Routing table mapping task types to primary and fallback LLM providers.
  *
- * Default code model: Qwen3 Coder 480B via Fireworks ($0.45/$1.80 per 1M tokens)
- * This replaces Anthropic as primary to avoid failures when ANTHROPIC_API_KEY is missing.
+ * Default code model: Kimi K2.5 via Fireworks ($0.60/$3.00 per 1M tokens)
+ * 1T MoE (32B active), #2 on AI Intelligence Index, strong agentic + coding.
  */
 const ROUTING_TABLE = {
   'code-generation': {
     primary: 'fireworks',
-    model: 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct',
+    model: 'accounts/fireworks/models/kimi-k2p5',
     fallback: 'openai',
   },
   'code-iteration': {
     primary: 'fireworks',
-    model: 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct',
+    model: 'accounts/fireworks/models/kimi-k2p5',
     fallback: 'openai',
   },
   'scaffold': {
     primary: 'fireworks',
-    model: 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct',
+    model: 'accounts/fireworks/models/kimi-k2p5',
     fallback: 'openai',
   },
   'config-files': {
     primary: 'fireworks',
-    model: 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct',
+    model: 'accounts/fireworks/models/kimi-k2p5',
     fallback: 'openai',
   },
   'landing-page': {
@@ -62,6 +62,9 @@ const ROUTING_TABLE = {
  * Maps model IDs to their provider name for model override routing.
  */
 const MODEL_TO_PROVIDER = {
+  'accounts/fireworks/models/kimi-k2p5': 'fireworks',
+  'accounts/fireworks/models/kimi-k2-instruct-0905': 'fireworks',
+  'accounts/fireworks/models/kimi-k2-thinking': 'fireworks',
   'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct': 'fireworks',
   'accounts/fireworks/models/deepseek-v3': 'fireworks',
   'accounts/fireworks/models/llama-v3p3-70b-instruct': 'fireworks',
@@ -109,7 +112,7 @@ class LLMRouter {
       logger.warn('Unknown task type, defaulting to fireworks', { taskType });
       const result = await this._generateWithProvider('fireworks', {
         ...genOptions,
-        model: genOptions.model || 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct',
+        model: genOptions.model || 'accounts/fireworks/models/kimi-k2p5',
       });
       return { ...result, provider: 'fireworks', fallbackUsed: false };
     }
