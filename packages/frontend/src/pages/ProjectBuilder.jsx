@@ -1617,23 +1617,45 @@ function PreviewTab({ project, files }) {
   const fileList = Array.isArray(files) ? files : [];
   const [refreshKey, setRefreshKey] = useState(0);
 
-  // Detect if this is a complex project with npm dependencies
-  const isComplexProject = useMemo(() => {
+  // Parse package.json dependencies and build esm.sh import map
+  const { importMapJson, depsCssLinks } = useMemo(() => {
     const pkgFile = fileList.find(f => (f.file_path || f.path || '') === 'package.json');
-    if (!pkgFile || !pkgFile.content) return false;
-    try {
-      const pkg = JSON.parse(pkgFile.content);
-      const deps = Object.keys(pkg.dependencies || {});
-      // If it has real npm deps beyond react basics, it's complex
-      const basicDeps = new Set(['react', 'react-dom', 'react-router-dom', 'react-router', 'next']);
-      return deps.some(d => !basicDeps.has(d));
-    } catch { return false; }
+    const imports = {
+      'react': 'https://esm.sh/react@18?dev',
+      'react/': 'https://esm.sh/react@18&dev/',
+      'react-dom': 'https://esm.sh/react-dom@18?dev&deps=react@18',
+      'react-dom/': 'https://esm.sh/react-dom@18&dev&deps=react@18/',
+      'react-dom/client': 'https://esm.sh/react-dom@18/client?dev&deps=react@18',
+    };
+    const cssLinks = [];
+    if (pkgFile?.content) {
+      try {
+        const pkg = JSON.parse(pkgFile.content);
+        const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+        // Built-in shims we handle ourselves — don't fetch from esm.sh
+        const shimmed = new Set(['react', 'react-dom', 'next', 'next/link', 'next/image', 'next/navigation', 'next/router']);
+        for (const [name, version] of Object.entries(deps)) {
+          if (shimmed.has(name)) continue;
+          // Clean version (strip ^, ~, >=, etc.)
+          const cleanVer = version.replace(/^[\^~>=<]+/, '');
+          const esmUrl = `https://esm.sh/${name}@${cleanVer}?deps=react@18,react-dom@18`;
+          imports[name] = esmUrl;
+          // Also map subpath imports (e.g. "lucide-react/dist/...")
+          imports[name + '/'] = `https://esm.sh/${name}@${cleanVer}&deps=react@18,react-dom@18/`;
+          // If the package has CSS (common UI libs), add a link
+          const cssPackages = ['tailwindcss', '@tailwindcss/typography'];
+          if (cssPackages.includes(name)) {
+            cssLinks.push(`https://esm.sh/${name}@${cleanVer}?css`);
+          }
+        }
+      } catch { /* ignore parse errors */ }
+    }
+    return { importMapJson: JSON.stringify({ imports }, null, 2), depsCssLinks: cssLinks };
   }, [fileList]);
 
-  // Build an in-browser preview from the generated React/Vite/Next.js files
+  // Build an in-browser preview using import maps + esm.sh for npm deps
   const previewHtml = useMemo(() => {
     if (fileList.length === 0) return null;
-    if (isComplexProject) return null; // Skip Babel preview for complex projects
 
     // Gather files by path
     const fileMap = {};
@@ -1645,33 +1667,71 @@ function PreviewTab({ project, files }) {
     // Find CSS
     const indexCss = fileMap['src/index.css'] || fileMap['src/globals.css'] || fileMap['src/app/globals.css'] || '';
 
+    // Clean CSS for embedding
+    const cleanCss = indexCss
+      .replace(/@tailwind\s+\w+;/g, '')
+      .replace(/@import\s+.*$/gm, '')
+      .replace(/@layer\s+\w+\s*\{[\s\S]*?\}/g, '')
+      .replace(/@apply\s+[^;]+;/g, '');
+
     // Helper: extract a valid JS identifier from a file path
     const toIdentifier = (path) => {
       const basename = path.split('/').pop();
       return basename.replace(/\.(jsx|tsx|js|ts)$/, '').replace(/[^a-zA-Z0-9]/g, '');
     };
 
-    // Helper: strip imports/exports and convert to a named global var
-    const processComponent = (code, name) => {
+    // Rewrite imports: convert relative imports to inline refs, keep npm imports for import map
+    const rewriteImports = (code, name) => {
       let c = code;
-      // Strip all import lines
-      c = c.replace(/^import\s+.*$/gm, '');
+      // Remove TypeScript type imports entirely
+      c = c.replace(/^import\s+type\s+.*$/gm, '');
+      // Remove CSS/SCSS/style imports (handled separately)
+      c = c.replace(/^import\s+['"].*\.(css|scss|sass|less)['"];?\s*$/gm, '');
+      // Convert relative imports to destructured refs (these are our own components)
+      // e.g. import Foo from './Foo' → /* resolved: Foo */
+      // e.g. import { Bar } from '../components/Bar' → /* resolved: Bar */
+      c = c.replace(/^import\s+.*from\s+['"]\.\.?\/.*['"];?\s*$/gm, '/* local import resolved */');
       // Convert "export default function Foo" → "function Foo"
       c = c.replace(/^export\s+default\s+function\s+/gm, 'function ');
-      // Convert "export default" → "var Name ="
-      c = c.replace(/^export\s+default\s+/gm, `var ${name} = `);
-      // Convert other exports
-      c = c.replace(/^export\s+/gm, 'var ');
+      // Convert "export default" → "const Name ="
+      c = c.replace(/^export\s+default\s+/gm, `const ${name} = `);
+      // Convert named exports → const
+      c = c.replace(/^export\s+(const|let|var|function|class)\s+/gm, '$1 ');
+      c = c.replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
       return c;
     };
+
+    // Collect all npm imports from all files for the module preamble
+    const npmImports = new Map(); // 'package' → Set of import statements
+    for (const f of fileList) {
+      const content = f.content || '';
+      // Match: import ... from 'package-name' (not relative)
+      const importRegex = /^(import\s+.*from\s+['"])([^.'"][^'"]*?)(['"];?\s*)$/gm;
+      let m;
+      while ((m = importRegex.exec(content)) !== null) {
+        const pkg = m[2];
+        // Skip relative imports and CSS
+        if (pkg.startsWith('.') || /\.(css|scss|sass|less)$/.test(pkg)) continue;
+        const fullImport = m[1] + pkg + m[3];
+        if (!npmImports.has(pkg)) npmImports.set(pkg, new Set());
+        npmImports.get(pkg).add(fullImport.trim());
+      }
+    }
+
+    // Build deduplicated npm import block
+    const npmImportLines = [];
+    for (const [, stmts] of npmImports) {
+      for (const stmt of stmts) npmImportLines.push(stmt);
+    }
 
     // Collect components (prefer .jsx version over extensionless duplicates)
     const collected = new Map();
     for (const f of fileList) {
       const path = f.file_path || f.path || '';
-      const isPage = path.startsWith('src/pages/');
-      const isComp = path.startsWith('src/components/');
-      if (!isPage && !isComp) continue;
+      const isPage = path.startsWith('src/pages/') || path.startsWith('src/app/') || path.startsWith('app/');
+      const isComp = path.startsWith('src/components/') || path.startsWith('components/') || path.startsWith('src/lib/') || path.startsWith('lib/');
+      const isSrcRoot = /^src\/[^/]+\.(jsx|tsx|js|ts)$/.test(path) && !path.includes('main') && !path.includes('index') && !path.includes('vite');
+      if (!isPage && !isComp && !isSrcRoot) continue;
       if (!f.content) continue;
 
       const hasExt = /\.(jsx|tsx|js|ts)$/.test(path);
@@ -1683,7 +1743,7 @@ function PreviewTab({ project, files }) {
       if (existing && existing.priority >= priority) continue;
 
       collected.set(name, {
-        code: processComponent(f.content, name),
+        code: rewriteImports(f.content, name),
         priority,
         isPage,
       });
@@ -1702,27 +1762,19 @@ function PreviewTab({ project, files }) {
       }
     }
 
-    // Find the "Home" page or first page to render as default
-    const homePage = pageNames.includes('Home') ? 'Home' : pageNames[0] || '';
+    if (pageNames.length === 0 && componentScripts.length === 0) return null;
 
-    // Clean CSS for embedding
-    const cleanCss = indexCss
-      .replace(/@tailwind\s+\w+;/g, '')
-      .replace(/@import\s+.*$/gm, '')
-      .replace(/@layer\s+\w+\s*\{[\s\S]*?\}/g, '')
-      .replace(/@apply\s+[^;]+;/g, '');
+    // Find the best page to render
+    const homePage = ['App', 'Home', 'Index', 'Page', 'Main'].find(n => pageNames.includes(n)) || pageNames[0] || '';
 
-    // Escape component code for embedding inside a JS string (used in a <script> block)
+    // Escape for embedding in script
     const escapeForScript = (str) => str
       .replace(/\\/g, '\\\\')
       .replace(/`/g, '\\`')
       .replace(/\$/g, '\\$')
       .replace(/<\/script>/gi, '<\\/script>');
 
-    const allCode = [
-      ...componentScripts,
-      ...pageScripts,
-    ].join('\n\n');
+    const allComponentCode = [...componentScripts, ...pageScripts].join('\n\n');
 
     // Build render expression
     const renderExpr = homePage
@@ -1731,17 +1783,20 @@ function PreviewTab({ project, files }) {
         ? pageNames.map(n => `typeof ${n} === 'function' ? React.createElement(${n}) : null`).join(' || ') + ' || null'
         : 'null';
 
+    // CSS links for deps
+    const cssLinkTags = depsCssLinks.map(url => `<link rel="stylesheet" href="${url}" />`).join('\n  ');
+
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Preview</title>
-  <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.development.js"><\/script>
-  <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.development.js"><\/script>
+  <script type="importmap">${importMapJson}<\/script>
   <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js"><\/script>
   <script src="https://cdn.tailwindcss.com"><\/script>
-  <style>${cleanCss}</style>
+  ${cssLinkTags}
+  <style>${escapeForScript(cleanCss)}</style>
   <style>
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
     img[src=""], img:not([src]) { display: inline-block; background: #e5e7eb; min-height: 40px; min-width: 40px; }
@@ -1755,130 +1810,106 @@ function PreviewTab({ project, files }) {
 </head>
 <body>
   <div id="root"><div id="loading"><div class="spinner"></div>Loading preview...</div></div>
-  <div id="timeout-msg"><h3>Preview not available</h3><p>This project may need to be deployed to preview. Complex apps with npm dependencies cannot be previewed in-browser.</p></div>
+  <div id="timeout-msg"><h3>Preview not available</h3><p>This project may need to be deployed for a full preview.</p></div>
   <div id="err" style="display:none;padding:1rem;color:#dc2626;font-size:13px;font-family:monospace;white-space:pre-wrap;background:#fef2f2;border-top:2px solid #dc2626;position:fixed;bottom:0;left:0;right:0;max-height:40vh;overflow:auto;z-index:9999"></div>
   <script>
-    // Manual Babel transform with proper error handling
     var _rendered = false;
-    window.onerror = function(msg, src, line, col, err) {
-      showError((err ? err.stack : msg));
-    };
+    window.onerror = function(msg, src, line, col, err) { showError(err ? err.stack : msg); };
     function showError(msg) {
       var el = document.getElementById('err');
       el.style.display = 'block';
       el.textContent += msg + '\\n\\n';
-      // Also show timeout message if render failed
       if (!_rendered) {
         document.getElementById('timeout-msg').style.display = 'block';
         var ld = document.getElementById('loading');
         if (ld) ld.style.display = 'none';
       }
     }
-    // Timeout: if preview hasn't rendered in 8 seconds, show fallback
     setTimeout(function() {
       if (!_rendered) {
+        document.getElementById('timeout-msg').style.display = 'block';
         var ld = document.getElementById('loading');
-        if (ld && ld.parentNode) {
-          document.getElementById('timeout-msg').style.display = 'block';
-          ld.style.display = 'none';
-        }
+        if (ld) ld.style.display = 'none';
       }
-    }, 8000);
+    }, 15000);
+  <\/script>
+  <script type="module">
+    // Step 1: Import npm deps via import map (resolved by esm.sh)
+    try {
+      ${escapeForScript(npmImportLines.join('\n      '))}
+    } catch(e) {
+      // Some packages may fail - continue with what we have
+      console.warn('Some npm imports failed:', e.message);
+    }
 
-    window.addEventListener('DOMContentLoaded', function() {
-      if (typeof Babel === 'undefined') {
-        showError('Babel failed to load from CDN');
-        return;
+    // Step 2: Make React available globally + provide shims
+    window.React = (await import('react'));
+    window.ReactDOM = (await import('react-dom/client'));
+    const React = window.React;
+    const ReactDOM = window.ReactDOM;
+    const { useState, useEffect, useRef, useCallback, useMemo, useContext, useReducer, Fragment, createContext, forwardRef, memo, lazy, Suspense } = React;
+
+    // React Router shims (for projects using react-router)
+    const _noop = () => {};
+    const _noopNav = () => _noop;
+    const BrowserRouter = (p) => p.children;
+    const Router = BrowserRouter;
+    const HashRouter = BrowserRouter;
+    const Routes = (p) => {
+      const arr = React.Children.toArray(p.children);
+      if (!arr.length) return null;
+      const first = arr[0];
+      return first.props.element || first.props.children || null;
+    };
+    const Switch = Routes;
+    const Route = (p) => p.element || p.children || null;
+    const Redirect = () => null;
+    const NavLink = (p) => React.createElement('a', { href: p.to || '#', className: typeof p.className === 'function' ? p.className({ isActive: false }) : p.className, onClick: (e) => e.preventDefault() }, p.children);
+    const Outlet = () => null;
+    const useNavigate = _noopNav;
+    const useLocation = () => ({ pathname: '/', search: '', hash: '' });
+    const useParams = () => ({});
+    const useSearchParams = () => [new URLSearchParams(), _noop];
+
+    // Next.js shims
+    const Link = (p) => React.createElement('a', { ...p, href: p.href || p.to || '#', onClick: (e) => e.preventDefault(), to: undefined, legacyBehavior: undefined }, p.children);
+    const Image = (p) => React.createElement('img', { src: p.src || '', alt: p.alt || '', width: p.width, height: p.height, className: p.className, style: p.fill ? { objectFit: 'cover', width: '100%', height: '100%' } : undefined });
+    const useRouter = () => ({ pathname: '/', query: {}, push: _noop, back: _noop, replace: _noop });
+    const usePathname = () => '/';
+
+    // Icon library fallback
+    const _iconProxy = typeof Proxy !== 'undefined' ? new Proxy({}, { get: (_, name) => (props) => React.createElement('span', props) }) : {};
+
+    // Step 3: Babel-transform user JSX → plain JS, then eval
+    if (typeof Babel === 'undefined') { showError('Babel failed to load'); throw new Error('no babel'); }
+
+    const jsxCode = \`${escapeForScript(allComponentCode)}
+
+    // Render
+    try {
+      const _root = ReactDOM.createRoot(document.getElementById('root'));
+      const _el = ${escapeForScript(renderExpr)};
+      if (_el) {
+        window._rendered = true;
+        _root.render(_el);
+      } else {
+        document.getElementById('timeout-msg').style.display = 'block';
+        document.getElementById('loading').style.display = 'none';
       }
-      if (typeof React === 'undefined' || typeof ReactDOM === 'undefined') {
-        showError('React/ReactDOM failed to load from CDN');
-        return;
-      }
+    } catch(_re) { showError('Render: ' + _re.message + '\\n' + _re.stack); }
+    \`;
 
-      // Destructure React hooks/APIs so they work after import stripping
-      var jsxCode = \`
-        var { useState, useEffect, useRef, useCallback, useMemo, useContext, useReducer, Fragment, createContext, forwardRef, memo, lazy, Suspense } = React;
-
-        // React Router shims
-        var BrowserRouter = function(p) { return p.children; };
-        var Router = BrowserRouter;
-        var HashRouter = BrowserRouter;
-        var Switch = function(p) {
-          var arr = React.Children.toArray(p.children);
-          if (arr.length === 0) return null;
-          var first = arr[0];
-          return first.props.element || first.props.children || (first.props.component ? React.createElement(first.props.component) : null);
-        };
-        var Routes = Switch;
-        var Route = function(p) { return p.element || (p.component ? React.createElement(p.component) : p.children) || null; };
-        var Redirect = function() { return null; };
-        var NavLink = function(p) { return React.createElement('a', { href: p.href || p.to || '#', className: p.className, onClick: function(e) { e.preventDefault(); } }, p.children); };
-
-        // Next.js shims
-        var Link = function(p) {
-          var target = p.href || p.to || '#';
-          return React.createElement('a', Object.assign({}, p, { href: target, onClick: function(e) { e.preventDefault(); }, to: undefined, legacyBehavior: undefined }), p.children);
-        };
-        var Image = function(p) {
-          return React.createElement('img', {
-            src: p.src || '', alt: p.alt || '', width: p.width, height: p.height,
-            className: p.className,
-            style: p.fill ? { objectFit: 'cover', width: '100%', height: '100%' } : undefined,
-            onError: function(e) { e.target.style.background = '#e5e7eb'; }
-          });
-        };
-        var useRouter = function() { return { pathname: '/', query: {}, push: function(){}, back: function(){}, replace: function(){} }; };
-        var useSearchParams = function() { return [new URLSearchParams(), function(){}]; };
-        var usePathname = function() { return '/'; };
-        var useParams = function() { return {}; };
-        var useNavigate = function() { return function(){}; };
-        var useLocation = function() { return { pathname: '/', search: '', hash: '' }; };
-        var Outlet = function() { return null; };
-
-        // Icon library shim: any unknown capitalized component becomes a span
-        var _iconHandler = { get: function(t, name) { return function(props) { return React.createElement('span', props); }; } };
-        var LucideIcons = typeof Proxy !== 'undefined' ? new Proxy({}, _iconHandler) : {};
-
-        ${escapeForScript(allCode)}
-      \`;
-
-      // Append render code (uses plain JS, no JSX)
-      jsxCode += \`
-        try {
-          var _root = ReactDOM.createRoot(document.getElementById('root'));
-          var _el = ${escapeForScript(renderExpr)};
-          if (_el) {
-            _rendered = true;
-            _root.render(_el);
-          } else {
-            document.getElementById('timeout-msg').style.display = 'block';
-            var _ld = document.getElementById('loading');
-            if (_ld) _ld.style.display = 'none';
-          }
-        } catch(_renderErr) {
-          showError('Render: ' + _renderErr.message + String.fromCharCode(10) + _renderErr.stack);
-        }
-      \`;
-
-      try {
-        var output = Babel.transform(jsxCode, {
-          presets: ['react'],
-          filename: 'preview.jsx'
-        });
-        try {
-          (new Function(output.code))();
-        } catch (evalErr) {
-          showError('Runtime error: ' + evalErr.message + String.fromCharCode(10) + evalErr.stack);
-        }
-      } catch (babelErr) {
-        showError('JSX compilation error: ' + babelErr.message);
-      }
-    });
+    try {
+      const output = Babel.transform(jsxCode, { presets: ['react'], filename: 'preview.jsx' });
+      eval(output.code);
+    } catch (err) {
+      showError(err.message + '\\n' + (err.stack || ''));
+    }
   <\/script>
 </body>
 </html>`;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileList, refreshKey]);
+  }, [fileList, refreshKey, importMapJson, depsCssLinks]);
 
   const handleRefresh = () => setRefreshKey((k) => k + 1);
 
@@ -1962,14 +1993,7 @@ function PreviewTab({ project, files }) {
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
         </svg>
       </div>
-      {isComplexProject ? (
-        <>
-          <h3 className="mb-1.5 text-sm font-semibold text-gray-700">Deploy to preview</h3>
-          <p className="max-w-xs text-xs text-gray-400">
-            This project has npm dependencies that require a full build. Deploy it to see a live preview.
-          </p>
-        </>
-      ) : fileList.length === 0 ? (
+      {fileList.length === 0 ? (
         <>
           <h3 className="mb-1.5 text-sm font-semibold text-gray-700">No preview available</h3>
           <p className="max-w-xs text-xs text-gray-400">
