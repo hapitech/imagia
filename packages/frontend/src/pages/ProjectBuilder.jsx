@@ -1742,9 +1742,14 @@ function PreviewTab({ project, files }) {
       let c = code;
       // Remove ALL import statements (npm deps loaded via import map, locals resolved)
       c = c.replace(/^import\s+.*$/gm, '');
-      // Strip CommonJS require() — not usable in browser
-      c = c.replace(/^.*require\s*\(.*\).*$/gm, '');
-      c = c.replace(/^module\.exports\s*=.*$/gm, '');
+      // Strip CommonJS require() — not usable in browser (use multiple passes for safety)
+      c = c.replace(/^.*\brequire\s*\(.*$/gm, '');
+      c = c.replace(/^module\.exports\b.*$/gm, '');
+      c = c.replace(/^exports\.\w+\s*=.*$/gm, '');
+      // Strip any remaining Node.js / backend patterns
+      c = c.replace(/^.*\bprocess\.env\b.*$/gm, '');
+      c = c.replace(/^.*\bmongoose\b.*$/gm, '');
+      c = c.replace(/^.*\bexpress\s*\(.*$/gm, '');
       // Convert all exports to use the file-derived name
       c = c.replace(/^export\s+default\s+function\s+\w+/gm, `function ${name}`);
       c = c.replace(/^export\s+default\s+function\s*(?=\()/gm, `function ${name}`);
@@ -1847,15 +1852,23 @@ function PreviewTab({ project, files }) {
     ];
 
     // Content patterns that indicate a file is backend/Node.js, not a React component
-    const backendContentPatterns = [
-      /\brequire\s*\(/,
-      /\bmodule\.exports\b/,
-      /\bexpress\s*\(\)/,
-      /\bmongoose\b/,
-      /\bnew\s+Router\b/,
-      /\bapp\.(get|post|put|patch|delete|use)\s*\(/,
-      /\bprocess\.env\b/,
-    ];
+    const isBackendContent = (content) => {
+      // Normalize line endings for consistent matching
+      const c = content.replace(/\r\n?/g, '\n');
+      // Check for Node.js / backend patterns
+      if (/\brequire\s*\(/.test(c)) return true;
+      if (/\bmodule\.exports\b/.test(c)) return true;
+      if (/\bexports\.\w+\s*=/.test(c)) return true;
+      if (/\bexpress\s*\(/.test(c)) return true;
+      if (/\bmongoose\b/.test(c)) return true;
+      if (/\bnew\s+Router\b/.test(c)) return true;
+      if (/\bapp\.(get|post|put|patch|delete|use)\s*\(/.test(c)) return true;
+      if (/\bprocess\.env\b/.test(c)) return true;
+      if (/\b(knex|sequelize|prisma|typeorm)\b/i.test(c)) return true;
+      if (/\b(createServer|listen)\s*\(/.test(c)) return true;
+      if (/^#!\//.test(c)) return true; // shebang
+      return false;
+    };
 
     const collected = new Map();
     for (const f of fileList) {
@@ -1868,7 +1881,7 @@ function PreviewTab({ project, files }) {
       // Skip entry files that just mount (e.g. main.jsx, index.js)
       if (entryFilePatterns.some(p => p.test(path))) continue;
       // Skip files that look like backend/Node.js code
-      if (backendContentPatterns.some(p => p.test(f.content))) continue;
+      if (isBackendContent(f.content)) continue;
       // Only include files that look like React components (contain JSX or React patterns)
       const hasJSX = /<[A-Z]\w/.test(f.content) || /<[a-z]+[\s>]/.test(f.content);
       const hasReactPatterns = /\b(useState|useEffect|useRef|useCallback|useMemo|React\.createElement|createContext|forwardRef)\b/.test(f.content);
@@ -1877,6 +1890,10 @@ function PreviewTab({ project, files }) {
 
       const name = toIdentifier(path);
       if (!name) continue;
+
+      const rewritten = rewriteImports(f.content, name);
+      // Post-rewrite sanity check: if rewritten code still has Node.js patterns, skip
+      if (/\brequire\s*\(/.test(rewritten) || /\bmodule\.exports\b/.test(rewritten)) continue;
 
       // Determine if this is a "page" (entry-level component) or a supporting component
       const isPage = /\b(pages?|views?|screens?|routes?|app)\b/i.test(path)
@@ -1889,7 +1906,7 @@ function PreviewTab({ project, files }) {
       if (existing && existing.priority >= priority) continue;
 
       collected.set(name, {
-        code: rewriteImports(f.content, name),
+        code: rewritten,
         priority,
         isPage,
       });
