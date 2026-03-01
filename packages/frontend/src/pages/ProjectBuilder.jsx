@@ -1915,7 +1915,8 @@ function PreviewTab({ project, files }) {
     const validIdent = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
     const allNames = [...new Set([...pageNames, ...[...collected.keys()]])].filter(n => validIdent.test(n));
     // Window export code — must run INSIDE eval() because const/let in eval are scoped to the eval call
-    const windowExportCode = allNames.map(n => `try{window['${n}']=${n}}catch(_){}`).join(';');
+    // Use double quotes for property names since this gets embedded inside a single-quoted JS string
+    const windowExportCode = allNames.map(n => `try{window["${n}"]=${n}}catch(_){}`).join(';');
 
     // Build render expression — use window.X since eval'd vars are scoped
     const renderExpr = homePage
