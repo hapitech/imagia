@@ -74,6 +74,10 @@ export function buildReactPreview(rawFileList, filePrefix = null) {
     c = c.replace(/^export\s+default\s+/gm, `var ${name} = `);
     c = c.replace(/^export\s+(const|let|var|function|class)\s+/gm, '$1 ');
     c = c.replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
+    // Replace const/let with var to prevent redeclaration errors
+    // when multiple files are concatenated into a single eval scope
+    c = c.replace(/^(\s*)(const|let)\s+/gm, '$1var ');
+
     const defMatch = c.match(/^(?:function|var|const|let)\s+([A-Z]\w*)/m);
     if (defMatch && defMatch[1] !== name) {
       c += `\nvar ${name} = ${defMatch[1]};`;
