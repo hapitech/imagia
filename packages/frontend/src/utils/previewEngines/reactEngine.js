@@ -151,7 +151,17 @@ export function buildReactPreview(rawFileList, filePrefix = null) {
 
   // ---- Collect npm imports only from files that passed the filter (merged per package) ----
   const pkgImportMap = new Map();
-  const declaredIdents = new Set(); // track all declared identifiers across packages
+  // Packages already shimmed in the module script — skip entirely
+  const shimmedPkgs = new Set([
+    'react-router-dom', 'react-router', 'react-router-dom/client',
+    'next/link', 'next/image', 'next/navigation', 'next/router', 'next/head',
+  ]);
+  // Identifiers already declared by shims — prevent cross-package duplicates
+  const declaredIdents = new Set([
+    'BrowserRouter', 'Router', 'HashRouter', 'Routes', 'Switch', 'Route',
+    'Redirect', 'NavLink', 'Outlet', 'useNavigate', 'useLocation', 'useParams',
+    'useSearchParams', 'Link', 'Image', 'useRouter', 'usePathname',
+  ]);
   for (const [, entry] of collected) {
     const content = entry.originalContent || '';
     const importRegex = /^import\s+(.*?)\s+from\s+['"]([^.'"][^'"]*?)['"];?\s*$/gm;
@@ -161,6 +171,7 @@ export function buildReactPreview(rawFileList, filePrefix = null) {
       const pkg = m[2];
       if (pkg.startsWith('.') || /\.(css|scss|sass|less)$/.test(pkg)) continue;
       if (pkg === 'react' || pkg === 'react-dom' || pkg === 'react-dom/client') continue;
+      if (shimmedPkgs.has(pkg)) continue;
       // Skip TypeScript type-only imports and local path aliases
       if (/^type\s/.test(clause)) continue;
       if (/^@\//.test(pkg) || /^~\//.test(pkg)) continue;
@@ -176,7 +187,9 @@ export function buildReactPreview(rawFileList, filePrefix = null) {
       const parts = clause.replace(/\s+/g, ' ');
       const braceMatch = parts.match(/\{([^}]*)\}/);
       if (braceMatch) {
-        braceMatch[1].split(',').map(s => s.trim()).filter(Boolean).forEach(n => pkgEntry.namedImports.add(n));
+        braceMatch[1].split(',').map(s => s.trim()).filter(Boolean)
+          .filter(n => !/^type\s/.test(n)) // skip inline type imports: { type Foo }
+          .forEach(n => pkgEntry.namedImports.add(n));
       }
       const beforeBrace = parts.replace(/\{[^}]*\}/, '').replace(/,/g, '').trim();
       if (beforeBrace) pkgEntry.defaultName = pkgEntry.defaultName || beforeBrace;
