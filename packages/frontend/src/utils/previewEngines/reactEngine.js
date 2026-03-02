@@ -74,6 +74,8 @@ export function buildReactPreview(rawFileList, filePrefix = null) {
     c = c.replace(/^export\s+default\s+/gm, `var ${name} = `);
     c = c.replace(/^export\s+(const|let|var|function|class)\s+/gm, '$1 ');
     c = c.replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
+    // Strip TypeScript type/interface exports (Babel handles the type syntax, but export keyword must go)
+    c = c.replace(/^export\s+(type|interface)\s+/gm, '$1 ');
     // Replace const/let with var to prevent redeclaration errors
     // when multiple files are concatenated into a single eval scope
     c = c.replace(/^(\s*)(const|let)\s+/gm, '$1var ');
@@ -84,64 +86,6 @@ export function buildReactPreview(rawFileList, filePrefix = null) {
     }
     return c;
   };
-
-  // ---- Collect npm imports (merged per package) ----
-  const pkgImportMap = new Map(); // pkg -> { defaultName, namedImports: Set, namespaceImport }
-  for (const f of fileList) {
-    const content = f.content || '';
-    const importRegex = /^import\s+(.*?)\s+from\s+['"]([^.'"][^'"]*?)['"];?\s*$/gm;
-    let m;
-    while ((m = importRegex.exec(content)) !== null) {
-      const clause = m[1].trim();
-      const pkg = m[2];
-      if (pkg.startsWith('.') || /\.(css|scss|sass|less)$/.test(pkg)) continue;
-      if (pkg === 'react' || pkg === 'react-dom' || pkg === 'react-dom/client') continue;
-
-      if (!pkgImportMap.has(pkg)) {
-        pkgImportMap.set(pkg, { defaultName: null, namedImports: new Set(), namespaceImport: null });
-      }
-      const entry = pkgImportMap.get(pkg);
-
-      const nsMatch = clause.match(/^\*\s+as\s+(\w+)$/);
-      if (nsMatch) { entry.namespaceImport = entry.namespaceImport || nsMatch[1]; continue; }
-
-      const parts = clause.replace(/\s+/g, ' ');
-      const braceMatch = parts.match(/\{([^}]*)\}/);
-      if (braceMatch) {
-        braceMatch[1].split(',').map(s => s.trim()).filter(Boolean).forEach(n => entry.namedImports.add(n));
-      }
-      const beforeBrace = parts.replace(/\{[^}]*\}/, '').replace(/,/g, '').trim();
-      if (beforeBrace) entry.defaultName = entry.defaultName || beforeBrace;
-    }
-  }
-
-  const dynamicImportLines = [...pkgImportMap.entries()].map(([pkg, { defaultName, namedImports, namespaceImport }]) => {
-    const escapedPkg = pkg.replace(/'/g, "\\'");
-    const named = [...namedImports];
-    if (namespaceImport) {
-      return `const ${namespaceImport} = await import('${escapedPkg}').catch(() => ({}));`;
-    }
-    const lines = [];
-    if (defaultName && named.length > 0) {
-      lines.push(`const _mod_${defaultName} = await import('${escapedPkg}').catch(() => ({}));`);
-      lines.push(`const ${defaultName} = _mod_${defaultName}.default || _mod_${defaultName};`);
-      const destructure = named.map(n => {
-        const asMatch = n.match(/^(\w+)\s+as\s+(\w+)$/);
-        return asMatch ? `${asMatch[1]}: ${asMatch[2]}` : n;
-      }).join(', ');
-      lines.push(`const { ${destructure} } = _mod_${defaultName};`);
-    } else if (defaultName) {
-      lines.push(`const _mod_${defaultName} = await import('${escapedPkg}').catch(() => ({}));`);
-      lines.push(`const ${defaultName} = _mod_${defaultName}.default || _mod_${defaultName};`);
-    } else if (named.length > 0) {
-      const destructure = named.map(n => {
-        const asMatch = n.match(/^(\w+)\s+as\s+(\w+)$/);
-        return asMatch ? `${asMatch[1]}: ${asMatch[2]}` : n;
-      }).join(', ');
-      lines.push(`const { ${destructure} } = await import('${escapedPkg}').catch(() => ({}));`);
-    }
-    return lines.join('\n      ');
-  });
 
   // ---- Filter & collect components ----
   const skipPatterns = [
@@ -202,8 +146,82 @@ export function buildReactPreview(rawFileList, filePrefix = null) {
     const existing = collected.get(name);
     if (existing && existing.priority >= priority) continue;
 
-    collected.set(name, { name, code: rewritten, isPage, priority });
+    collected.set(name, { name, code: rewritten, originalContent: f.content, isPage, priority });
   }
+
+  // ---- Collect npm imports only from files that passed the filter (merged per package) ----
+  const pkgImportMap = new Map();
+  const declaredIdents = new Set(); // track all declared identifiers across packages
+  for (const [, entry] of collected) {
+    const content = entry.originalContent || '';
+    const importRegex = /^import\s+(.*?)\s+from\s+['"]([^.'"][^'"]*?)['"];?\s*$/gm;
+    let m;
+    while ((m = importRegex.exec(content)) !== null) {
+      const clause = m[1].trim();
+      const pkg = m[2];
+      if (pkg.startsWith('.') || /\.(css|scss|sass|less)$/.test(pkg)) continue;
+      if (pkg === 'react' || pkg === 'react-dom' || pkg === 'react-dom/client') continue;
+      // Skip TypeScript type-only imports and local path aliases
+      if (/^type\s/.test(clause)) continue;
+      if (/^@\//.test(pkg) || /^~\//.test(pkg)) continue;
+
+      if (!pkgImportMap.has(pkg)) {
+        pkgImportMap.set(pkg, { defaultName: null, namedImports: new Set(), namespaceImport: null });
+      }
+      const pkgEntry = pkgImportMap.get(pkg);
+
+      const nsMatch = clause.match(/^\*\s+as\s+(\w+)$/);
+      if (nsMatch) { pkgEntry.namespaceImport = pkgEntry.namespaceImport || nsMatch[1]; continue; }
+
+      const parts = clause.replace(/\s+/g, ' ');
+      const braceMatch = parts.match(/\{([^}]*)\}/);
+      if (braceMatch) {
+        braceMatch[1].split(',').map(s => s.trim()).filter(Boolean).forEach(n => pkgEntry.namedImports.add(n));
+      }
+      const beforeBrace = parts.replace(/\{[^}]*\}/, '').replace(/,/g, '').trim();
+      if (beforeBrace) pkgEntry.defaultName = pkgEntry.defaultName || beforeBrace;
+    }
+  }
+
+  const dynamicImportLines = [...pkgImportMap.entries()].map(([pkg, { defaultName, namedImports, namespaceImport }]) => {
+    const escapedPkg = pkg.replace(/'/g, "\\'");
+    const named = [...namedImports];
+    if (namespaceImport) {
+      if (declaredIdents.has(namespaceImport)) return '';
+      declaredIdents.add(namespaceImport);
+      return `const ${namespaceImport} = await import('${escapedPkg}').catch(() => ({}));`;
+    }
+    const lines = [];
+    // Deduplicate: skip default/named identifiers already declared by another package
+    const safeDefault = defaultName && !declaredIdents.has(defaultName) ? defaultName : null;
+    const safeNamed = named.filter(n => {
+      const ident = n.match(/\bas\s+(\w+)$/)?.[1] || n;
+      return !declaredIdents.has(ident);
+    });
+
+    if (safeDefault) declaredIdents.add(safeDefault);
+    safeNamed.forEach(n => { declaredIdents.add(n.match(/\bas\s+(\w+)$/)?.[1] || n); });
+
+    if (safeDefault && safeNamed.length > 0) {
+      lines.push(`const _mod_${safeDefault} = await import('${escapedPkg}').catch(() => ({}));`);
+      lines.push(`const ${safeDefault} = _mod_${safeDefault}.default || _mod_${safeDefault};`);
+      const destructure = safeNamed.map(n => {
+        const asMatch = n.match(/^(\w+)\s+as\s+(\w+)$/);
+        return asMatch ? `${asMatch[1]}: ${asMatch[2]}` : n;
+      }).join(', ');
+      lines.push(`const { ${destructure} } = _mod_${safeDefault};`);
+    } else if (safeDefault) {
+      lines.push(`const _mod_${safeDefault} = await import('${escapedPkg}').catch(() => ({}));`);
+      lines.push(`const ${safeDefault} = _mod_${safeDefault}.default || _mod_${safeDefault};`);
+    } else if (safeNamed.length > 0) {
+      const destructure = safeNamed.map(n => {
+        const asMatch = n.match(/^(\w+)\s+as\s+(\w+)$/);
+        return asMatch ? `${asMatch[1]}: ${asMatch[2]}` : n;
+      }).join(', ');
+      lines.push(`const { ${destructure} } = await import('${escapedPkg}').catch(() => ({}));`);
+    }
+    return lines.join('\n      ');
+  }).filter(Boolean);
 
   // Split into pages and components
   const pageScripts = [];
