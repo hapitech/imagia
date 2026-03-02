@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import useProgress from '../hooks/useProgress';
 import useChat from '../hooks/useChat';
 import useIsMobile from '../hooks/useIsMobile';
+import { buildPreview } from '../utils/previewEngines/index.js';
 import {
   getProject,
   getProjectFiles,
@@ -1686,453 +1687,12 @@ function PreviewTab({ project, files }) {
   const fileList = Array.isArray(files) ? files : [];
   const [refreshKey, setRefreshKey] = useState(0);
 
-  // Parse package.json dependencies and build esm.sh import map
-  const { importMapJson, depsCssLinks } = useMemo(() => {
-    const pkgFile = fileList.find(f => (f.file_path || f.path || '') === 'package.json');
-    const imports = {
-      'react': 'https://esm.sh/react@18?dev',
-      'react/': 'https://esm.sh/react@18&dev/',
-      'react-dom': 'https://esm.sh/react-dom@18?dev&deps=react@18',
-      'react-dom/': 'https://esm.sh/react-dom@18&dev&deps=react@18/',
-      'react-dom/client': 'https://esm.sh/react-dom@18/client?dev&deps=react@18',
-    };
-    const cssLinks = [];
-    if (pkgFile?.content) {
-      try {
-        const pkg = JSON.parse(pkgFile.content);
-        const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
-        // Built-in shims we handle ourselves — don't fetch from esm.sh
-        // Packages we handle via CDN or shims — skip from esm.sh import map
-        const shimmed = new Set([
-          'react', 'react-dom', 'next', 'next/link', 'next/image', 'next/navigation', 'next/router',
-          'tailwindcss', // loaded via cdn.tailwindcss.com script tag
-        ]);
-        for (const [name, version] of Object.entries(deps)) {
-          if (shimmed.has(name)) continue;
-          const cleanVer = version.replace(/^[\^~>=<]+/, '');
-          const esmUrl = `https://esm.sh/${name}@${cleanVer}?deps=react@18,react-dom@18`;
-          imports[name] = esmUrl;
-          imports[name + '/'] = `https://esm.sh/${name}@${cleanVer}&deps=react@18,react-dom@18/`;
-        }
-      } catch { /* ignore parse errors */ }
-    }
-    return { importMapJson: JSON.stringify({ imports }, null, 2), depsCssLinks: cssLinks };
-  }, [fileList]);
-
-  // Build an in-browser preview using import maps + esm.sh for npm deps
-  const previewHtml = useMemo(() => {
-    if (fileList.length === 0) return null;
-
-    // Gather files by path
-    const fileMap = {};
-    for (const f of fileList) {
-      const path = f.file_path || f.path || '';
-      fileMap[path] = f.content || '';
-    }
-
-    // Find CSS — check many common locations
-    const cssKeys = Object.keys(fileMap).filter(k => /\.(css|scss)$/.test(k)).sort();
-    const primaryCssKey = ['src/index.css', 'src/globals.css', 'src/app/globals.css', 'src/styles/globals.css', 'styles/globals.css', 'app/globals.css', 'index.css', 'globals.css']
-      .find(k => fileMap[k]) || cssKeys[0] || '';
-    const indexCss = fileMap[primaryCssKey] || '';
-
-    // Clean CSS for embedding
-    const cleanCss = indexCss
-      .replace(/@tailwind\s+\w+;/g, '')
-      .replace(/@import\s+.*$/gm, '')
-      .replace(/@layer\s+\w+\s*\{[\s\S]*?\}/g, '')
-      .replace(/@apply\s+[^;]+;/g, '');
-
-    // Helper: extract a valid JS identifier from a file path
-    const toIdentifier = (path) => {
-      const basename = path.split('/').pop();
-      let name = basename.replace(/\.(jsx|tsx|js|ts)$/, '').replace(/[^a-zA-Z0-9_$]/g, '');
-      // Ensure it starts with a letter/underscore (not a digit)
-      if (/^[0-9]/.test(name)) name = '_' + name;
-      return name;
-    };
-
-    // Rewrite imports: convert relative imports to inline refs, keep npm imports for import map
-    const rewriteImports = (code, name) => {
-      let c = code;
-      // Remove ALL import statements (npm deps loaded via import map, locals resolved)
-      c = c.replace(/^import\s+.*$/gm, '');
-      // Strip CommonJS require() — not usable in browser (use multiple passes for safety)
-      c = c.replace(/^.*\brequire\s*\(.*$/gm, '');
-      c = c.replace(/^module\.exports\b.*$/gm, '');
-      c = c.replace(/^exports\.\w+\s*=.*$/gm, '');
-      // Strip any remaining Node.js / backend patterns
-      c = c.replace(/^.*\bprocess\.env\b.*$/gm, '');
-      c = c.replace(/^.*\bmongoose\b.*$/gm, '');
-      c = c.replace(/^.*\bexpress\s*\(.*$/gm, '');
-      // Convert all exports to use the file-derived name
-      c = c.replace(/^export\s+default\s+function\s+\w+/gm, `function ${name}`);
-      c = c.replace(/^export\s+default\s+function\s*(?=\()/gm, `function ${name}`);
-      c = c.replace(/^export\s+default\s+class\s+\w+/gm, `var ${name} = class ${name}`);
-      c = c.replace(/^export\s+default\s+/gm, `var ${name} = `);
-      c = c.replace(/^export\s+(const|let|var|function|class)\s+/gm, '$1 ');
-      c = c.replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
-      // After all rewrites, ensure the file-derived name exists as a binding.
-      // If code defines a different top-level function/const, alias it.
-      const defMatch = c.match(/^(?:function|var|const|let)\s+([A-Z]\w*)/m);
-      if (defMatch && defMatch[1] !== name) {
-        c += `\nvar ${name} = ${defMatch[1]};`;
-      }
-      return c;
-    };
-
-    // Collect all npm imports from all files — parse into structured data
-    // so we can generate dynamic import() calls instead of static imports
-    const npmImportEntries = []; // { pkg, defaultName, namedImports: ['a','b'], namespaceImport: 'ns' }
-    const seenImports = new Set(); // dedup
-    for (const f of fileList) {
-      const content = f.content || '';
-      const importRegex = /^import\s+(.*?)\s+from\s+['"]([^.'"][^'"]*?)['"];?\s*$/gm;
-      let m;
-      while ((m = importRegex.exec(content)) !== null) {
-        const clause = m[1].trim();
-        const pkg = m[2];
-        if (pkg.startsWith('.') || /\.(css|scss|sass|less)$/.test(pkg)) continue;
-        // Skip react/react-dom — loaded separately
-        if (pkg === 'react' || pkg === 'react-dom' || pkg === 'react-dom/client') continue;
-        const key = `${clause}::${pkg}`;
-        if (seenImports.has(key)) continue;
-        seenImports.add(key);
-
-        const entry = { pkg, defaultName: null, namedImports: [], namespaceImport: null };
-        // Parse: import * as ns from 'pkg'
-        const nsMatch = clause.match(/^\*\s+as\s+(\w+)$/);
-        if (nsMatch) { entry.namespaceImport = nsMatch[1]; npmImportEntries.push(entry); continue; }
-        // Parse: import { a, b as c } from 'pkg' OR import Default, { a, b } from 'pkg'
-        const parts = clause.replace(/\s+/g, ' ');
-        const braceMatch = parts.match(/\{([^}]*)\}/);
-        if (braceMatch) {
-          entry.namedImports = braceMatch[1].split(',').map(s => s.trim()).filter(Boolean);
-        }
-        const beforeBrace = parts.replace(/\{[^}]*\}/, '').replace(/,/g, '').trim();
-        if (beforeBrace) entry.defaultName = beforeBrace;
-        npmImportEntries.push(entry);
-      }
-    }
-
-    // Build dynamic import lines:
-    // const { named1, named2 } = await import('pkg').catch(() => ({}));
-    // const DefaultName = (await import('pkg').catch(() => ({}))).default || (await import('pkg').catch(() => ({})));
-    const dynamicImportLines = npmImportEntries.map(({ pkg, defaultName, namedImports, namespaceImport }) => {
-      const escapedPkg = pkg.replace(/'/g, "\\'");
-      if (namespaceImport) {
-        return `const ${namespaceImport} = await import('${escapedPkg}').catch(() => ({}));`;
-      }
-      const lines = [];
-      if (defaultName && namedImports.length > 0) {
-        lines.push(`const _mod_${defaultName} = await import('${escapedPkg}').catch(() => ({}));`);
-        lines.push(`const ${defaultName} = _mod_${defaultName}.default || _mod_${defaultName};`);
-        // Handle "as" aliases in named imports
-        const destructure = namedImports.map(n => {
-          const asMatch = n.match(/^(\w+)\s+as\s+(\w+)$/);
-          return asMatch ? `${asMatch[1]}: ${asMatch[2]}` : n;
-        }).join(', ');
-        lines.push(`const { ${destructure} } = _mod_${defaultName};`);
-      } else if (defaultName) {
-        lines.push(`const _mod_${defaultName} = await import('${escapedPkg}').catch(() => ({}));`);
-        lines.push(`const ${defaultName} = _mod_${defaultName}.default || _mod_${defaultName};`);
-      } else if (namedImports.length > 0) {
-        const destructure = namedImports.map(n => {
-          const asMatch = n.match(/^(\w+)\s+as\s+(\w+)$/);
-          return asMatch ? `${asMatch[1]}: ${asMatch[2]}` : n;
-        }).join(', ');
-        lines.push(`const { ${destructure} } = await import('${escapedPkg}').catch(() => ({}));`);
-      }
-      return lines.join('\n      ');
-    });
-
-    // Collect JS/JSX/TS/TSX files as potential React components
-    // Aggressively filter out backend, config, and non-component files
-    const skipPatterns = [
-      /node_modules\//,
-      /\.(test|spec|stories|d)\.(js|jsx|ts|tsx)$/,
-      /\.(config|setup)\.(js|ts|mjs|cjs)$/,
-      /(vite|webpack|babel|jest|tailwind|postcss|tsconfig|next)\./,
-      /\.env/,
-      /package\.json$/,
-      /README/i,
-      /LICENSE/i,
-      // Backend / server directories (NOT routes/api/models — those are valid React conventions)
-      /\b(server|controllers|middleware|migrations|seeds|db|prisma|knex|cron)\b\//i,
-      // Common backend entry files (only server.js — app.js and index.js can be React components)
-      /\bserver\.(js|ts)$/,
-    ];
-    const entryFilePatterns = [
-      /^(src\/)?(main|index)\.(jsx|tsx|js|ts)$/,
-    ];
-
-    // Content patterns that indicate a file is backend/Node.js, not a React component.
-    // Conservative: only flag patterns that are unambiguously server-side.
-    // process.env is NOT checked here — rewriteImports strips it, and React apps use it too.
-    const isBackendContent = (content) => {
-      const c = content.replace(/\r\n?/g, '\n');
-      if (/\brequire\s*\(/.test(c)) return true;
-      if (/\bmodule\.exports\b/.test(c)) return true;
-      if (/\bexports\.\w+\s*=/.test(c)) return true;
-      if (/\bexpress\s*\(\s*\)/.test(c)) return true; // express() call specifically
-      if (/\bmongoose\.(connect|model|Schema)\b/.test(c)) return true; // mongoose API, not the word
-      if (/\bcreateServer\s*\(/.test(c)) return true;
-      if (/^#!\//.test(c)) return true; // shebang
-      return false;
-    };
-
-    const collected = new Map();
-    const _debugSkipped = { noContent: 0, notJsx: 0, skipPattern: 0, entryFile: 0, backend: 0, noReact: 0, postRewrite: 0 };
-    const _debugPaths = [];
-    for (const f of fileList) {
-      const path = f.file_path || f.path || '';
-      if (!f.content) { _debugSkipped.noContent++; continue; }
-      // Only JS/JSX/TS/TSX files
-      if (!/\.(jsx|tsx|js|ts)$/.test(path)) { _debugSkipped.notJsx++; continue; }
-      // Skip non-component files
-      if (skipPatterns.some(p => p.test(path))) { _debugSkipped.skipPattern++; _debugPaths.push('skip:' + path); continue; }
-      // Skip entry files that just mount (e.g. main.jsx, index.js)
-      if (entryFilePatterns.some(p => p.test(path))) { _debugSkipped.entryFile++; _debugPaths.push('entry:' + path); continue; }
-      // Skip files that look like backend/Node.js code
-      if (isBackendContent(f.content)) { _debugSkipped.backend++; _debugPaths.push('backend:' + path); continue; }
-      // Only include files that look like React components (contain JSX or React patterns)
-      const hasJSX = /<[A-Z]\w/.test(f.content) || /<[a-z]+[\s>]/.test(f.content);
-      const hasReactPatterns = /\b(useState|useEffect|useRef|useCallback|useMemo|React\.createElement|createContext|forwardRef)\b/.test(f.content);
-      const hasExportDefault = /\bexport\s+default\b/.test(f.content);
-      if (!hasJSX && !hasReactPatterns && !hasExportDefault) { _debugSkipped.noReact++; _debugPaths.push('noReact:' + path); continue; }
-
-      const name = toIdentifier(path);
-      if (!name) continue;
-
-      const rewritten = rewriteImports(f.content, name);
-      // Post-rewrite sanity check: if rewritten code still has Node.js patterns, skip
-      if (/\brequire\s*\(/.test(rewritten) || /\bmodule\.exports\b/.test(rewritten)) { _debugSkipped.postRewrite++; _debugPaths.push('postRewrite:' + path); continue; }
-
-      // Determine if this is a "page" (entry-level component) or a supporting component
-      const isPage = /\b(pages?|views?|screens?|routes?|app)\b/i.test(path)
-        || /^(src\/)?App\.(jsx|tsx|js|ts)$/.test(path)
-        || /^(src\/)?[^/]+\.(jsx|tsx)$/.test(path); // root-level JSX files are likely pages
-
-      const hasExt = /\.(jsx|tsx)$/.test(path);
-      const priority = hasExt ? 1 : 0;
-      const existing = collected.get(name);
-      if (existing && existing.priority >= priority) continue;
-
-      collected.set(name, {
-        code: rewritten,
-        priority,
-        isPage,
-      });
-    }
-
-    // Split into components and pages
-    const componentScripts = [];
-    const pageScripts = [];
-    const pageNames = [];
-    for (const [name, { code, isPage }] of collected) {
-      if (isPage) {
-        pageScripts.push(code);
-        pageNames.push(name);
-      } else {
-        componentScripts.push(code);
-      }
-    }
-
-    // If no pages found, promote all components to pages (best effort)
-    if (pageNames.length === 0 && componentScripts.length > 0) {
-      for (const [name, { code }] of collected) {
-        pageScripts.push(code);
-        pageNames.push(name);
-      }
-      componentScripts.length = 0;
-    }
-
-    // Diagnostic logging for remote debugging
-    console.log('[Preview] Pipeline:', { totalFiles: fileList.length, collected: collected.size, pages: pageNames.length, components: componentScripts.length, skipped: _debugSkipped });
-    if (_debugPaths.length > 0) console.log('[Preview] Filtered paths:', _debugPaths.slice(0, 20));
-    if (pageNames.length > 0) console.log('[Preview] Pages:', pageNames, 'Components:', [...collected.keys()].filter(n => !pageNames.includes(n)));
-
-    if (pageNames.length === 0) return null;
-
-    // Find the best page to render — prefer App, then common page names
-    const homePage = ['App', 'Home', 'Index', 'Page', 'Main', 'Root', 'Layout', 'Dashboard'].find(n => pageNames.includes(n)) || pageNames[0] || '';
-
-    // Escape for embedding in script
-    const escapeForScript = (str) => str
-      .replace(/\\/g, '\\\\')
-      .replace(/`/g, '\\`')
-      .replace(/\$/g, '\\$')
-      .replace(/<\/script>/gi, '<\\/script>');
-
-    const allComponentCode = [...componentScripts, ...pageScripts].join('\n\n');
-    // Filter to valid JS identifiers only (e.g. "404" from 404.tsx would break `window.404 = 404`)
-    const validIdent = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
-    const allNames = [...new Set([...pageNames, ...[...collected.keys()]])].filter(n => validIdent.test(n));
-    // Window export code — must run INSIDE eval() because const/let in eval are scoped to the eval call
-    // Use double quotes for property names since this gets embedded inside a single-quoted JS string
-    const windowExportCode = allNames.map(n => `try{window["${n}"]=${n}}catch(_){}`).join(';');
-
-    // Build render expression — use window.X since eval'd vars are scoped
-    const renderExpr = homePage
-      ? `typeof window.${homePage} === 'function' ? React.createElement(window.${homePage}) : null`
-      : pageNames.length > 0
-        ? pageNames.map(n => `typeof window.${n} === 'function' ? React.createElement(window.${n}) : null`).join(' || ') + ' || null'
-        : 'null';
-
-    // CSS links for deps
-    const cssLinkTags = depsCssLinks.map(url => `<link rel="stylesheet" href="${url}" />`).join('\n  ');
-
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Preview</title>
-  <script type="importmap">${importMapJson}<\/script>
-  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js"><\/script>
-  <script src="https://cdn.tailwindcss.com"><\/script>
-  ${cssLinkTags}
-  <style>${escapeForScript(cleanCss)}</style>
-  <style>
-    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
-    img[src=""], img:not([src]) { display: inline-block; background: #e5e7eb; min-height: 40px; min-width: 40px; }
-    #loading { display: flex; align-items: center; justify-content: center; height: 100vh; color: #9ca3af; font-size: 14px; flex-direction: column; gap: 8px; }
-    #loading .spinner { width: 24px; height: 24px; border: 3px solid #e5e7eb; border-top-color: #6366f1; border-radius: 50%; animation: spin 0.8s linear infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    #timeout-msg { display: none; text-align: center; padding: 2rem; color: #6b7280; }
-    #timeout-msg h3 { font-size: 14px; font-weight: 600; color: #374151; margin-bottom: 4px; }
-    #timeout-msg p { font-size: 12px; }
-  </style>
-</head>
-<body>
-  <div id="root"><div id="loading"><div class="spinner"></div>Loading preview...</div></div>
-  <div id="err" style="display:none;padding:1rem;color:#dc2626;font-size:13px;font-family:monospace;white-space:pre-wrap;background:#fef2f2;border:2px solid #fca5a5;border-radius:8px;margin:1rem;max-height:40vh;overflow:auto"></div>
-  <div id="timeout-msg"><h3>Preview not available</h3><p>This project may need to be deployed for a full preview.</p></div>
-  <script>
-    var _rendered = false;
-    window.onerror = function(msg, src, line, col, err) { showError(err ? err.stack : msg); };
-    window.addEventListener('unhandledrejection', function(e) { showError('Unhandled: ' + (e.reason?.message || e.reason || 'unknown')); });
-    function showError(msg) {
-      var el = document.getElementById('err');
-      el.style.display = 'block';
-      el.textContent += msg + String.fromCharCode(10, 10);
-      try { window.parent.postMessage({ type: 'preview-error', error: String(msg).substring(0, 500) }, '*'); } catch(_){}
-      if (!_rendered) {
-        document.getElementById('timeout-msg').style.display = 'block';
-        var ld = document.getElementById('loading');
-        if (ld) ld.style.display = 'none';
-      }
-    }
-    setTimeout(function() {
-      if (!_rendered) {
-        document.getElementById('timeout-msg').style.display = 'block';
-        var ld = document.getElementById('loading');
-        if (ld) ld.style.display = 'none';
-      }
-    }, 15000);
-  <\/script>
-  <script type="module">
-  // Wrap everything in async IIFE + try/catch — module-level errors are invisible to window.onerror
-  (async () => {
-    try {
-      // Step 1: Load React first
-      const _reactMod = await import('react').catch(e => { showError('React load failed: ' + e.message); return null; });
-      const _reactDomMod = await import('react-dom/client').catch(e => { showError('ReactDOM load failed: ' + e.message); return null; });
-      if (!_reactMod || !_reactMod.createElement) { showError('React failed to load from esm.sh CDN'); return; }
-      window.React = _reactMod;
-      window.ReactDOM = _reactDomMod || {};
-      const React = _reactMod;
-      const ReactDOM = _reactDomMod || {};
-      const { useState, useEffect, useRef, useCallback, useMemo, useContext, useReducer, Fragment, createContext, forwardRef, memo, lazy, Suspense } = React;
-
-      // Step 2: Import npm deps — each can fail independently
-      ${dynamicImportLines.join('\n      ')}
-
-      // React Router shims
-      const _noop = () => {};
-      const _noopNav = () => _noop;
-      const BrowserRouter = (p) => p.children;
-      const Router = BrowserRouter;
-      const HashRouter = BrowserRouter;
-      const Routes = (p) => { const arr = React.Children.toArray(p.children); return arr.length ? (arr[0].props.element || arr[0].props.children || null) : null; };
-      const Switch = Routes;
-      const Route = (p) => p.element || p.children || null;
-      const Redirect = () => null;
-      const NavLink = (p) => React.createElement('a', { href: p.to || '#', className: typeof p.className === 'function' ? p.className({ isActive: false }) : p.className, onClick: (e) => e.preventDefault() }, p.children);
-      const Outlet = () => null;
-      const useNavigate = _noopNav;
-      const useLocation = () => ({ pathname: '/', search: '', hash: '' });
-      const useParams = () => ({});
-      const useSearchParams = () => [new URLSearchParams(), _noop];
-
-      // Next.js shims
-      const Link = (p) => React.createElement('a', { ...p, href: p.href || p.to || '#', onClick: (e) => e.preventDefault(), to: undefined, legacyBehavior: undefined }, p.children);
-      const Image = (p) => React.createElement('img', { src: p.src || '', alt: p.alt || '', width: p.width, height: p.height, className: p.className, style: p.fill ? { objectFit: 'cover', width: '100%', height: '100%' } : undefined });
-      const useRouter = () => ({ pathname: '/', query: {}, push: _noop, back: _noop, replace: _noop });
-      const usePathname = () => '/';
-
-      // Icon/library fallbacks — Proxy returns stub components for unknown imports
-      const _iconProxy = typeof Proxy !== 'undefined' ? new Proxy({}, { get: (_, name) => (props) => React.createElement('span', props) }) : {};
-
-      // Step 3: Babel-transform user JSX/TSX → plain JS, then eval
-      if (typeof Babel === 'undefined') { showError('Babel failed to load'); return; }
-
-      const jsxCode = \`${escapeForScript(allComponentCode)}\`;
-
-      console.log('[Preview] JSX code length:', jsxCode.length, 'chars');
-      console.log('[Preview] Will try to render: ${homePage || pageNames[0] || 'none'}');
-
-      var _transformedCode;
-      try {
-        _transformedCode = Babel.transform(jsxCode, {
-          presets: ['react', ['typescript', { allExtensions: true, isTSX: true }]],
-          filename: 'preview.tsx',
-        }).code;
-        console.log('[Preview] Babel transform OK, output length:', _transformedCode.length);
-      } catch (babelErr) {
-        showError('Babel transform failed: ' + babelErr.message);
-        return;
-      }
-
-      try {
-        // Strip "use strict" — it scopes var declarations to eval, preventing global leaking
-        var _evalCode = _transformedCode.replace(/^"use strict";?\s*/gm, '');
-        // Convert top-level const/let to var so they create true global bindings
-        _evalCode = _evalCode.replace(/^(const|let) /gm, 'var ');
-        // Append window exports INSIDE the eval so vars are still in scope
-        _evalCode += ';${windowExportCode}';
-        console.log('[Preview] Eval code:', _evalCode.substring(0, 500));
-        (0, eval)(_evalCode);
-        console.log('[Preview] Eval OK, window exports:', ${JSON.stringify(allNames)}.map(n => n + '=' + typeof window[n]).join(', '));
-      } catch (evalErr) {
-        showError('Code eval failed: ' + evalErr.message);
-        return;
-      }
-
-      // Step 4: Render the top-level component
-      try {
-        const _root = ReactDOM.createRoot(document.getElementById('root'));
-        console.log('[Preview] Checking components:', ${JSON.stringify(pageNames)}.map(n => n + '=' + typeof window[n]).join(', '));
-        const _el = ${renderExpr};
-        if (_el) {
-          window._rendered = true;
-          _root.render(_el);
-          console.log('[Preview] Rendered successfully');
-        } else {
-          showError('No renderable component found. Available: ${pageNames.join(', ')}');
-        }
-      } catch(_re) {
-        showError('Render error: ' + _re.message);
-      }
-    } catch (moduleErr) {
-      showError('Module: ' + moduleErr.message + ' | ' + (moduleErr.stack || ''));
-    }
-  })();
-  <\/script>
-</body>
-</html>`;
+  // Build preview using multi-engine system
+  const { html: previewHtml, engine, engineLabel } = useMemo(() => {
+    if (fileList.length === 0) return { html: null, engine: null, engineLabel: '' };
+    return buildPreview(project, fileList);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileList, refreshKey, importMapJson, depsCssLinks]);
+  }, [fileList, refreshKey, project]);
 
   const handleRefresh = () => setRefreshKey((k) => k + 1);
 
@@ -2160,11 +1720,10 @@ function PreviewTab({ project, files }) {
     </div>
   );
 
-  // Report preview state to backend for remote debugging (user may be on phone)
+  // Report preview state to backend for remote debugging
   useEffect(() => {
-    const state = deployUrl ? 'deployed-url' : previewHtml ? 'in-browser' : fileList.length === 0 ? 'no-files' : 'no-renderable-components';
-    const info = { state, fileCount: fileList.length, deployUrl: deployUrl || null };
-    // Only log non-deployed states (deployed is expected to work)
+    const state = deployUrl ? 'deployed-url' : previewHtml ? `in-browser-${engine}` : fileList.length === 0 ? 'no-files' : 'no-renderable-components';
+    const info = { state, engine, fileCount: fileList.length, deployUrl: deployUrl || null };
     if (state !== 'deployed-url') {
       fetch('/api/client-log', {
         method: 'POST',
@@ -2172,7 +1731,7 @@ function PreviewTab({ project, files }) {
         body: JSON.stringify({ level: 'info', message: `Preview state: ${state}`, context: { ...info, source: 'preview-tab' } }),
       }).catch(() => {});
     }
-  }, [deployUrl, previewHtml, fileList.length]);
+  }, [deployUrl, previewHtml, engine, fileList.length]);
 
   // If there's a deployment URL, show deployed version
   if (deployUrl) {
@@ -2204,11 +1763,17 @@ function PreviewTab({ project, files }) {
 
   // In-browser preview from generated files
   if (previewHtml) {
+    const badgeColor = engine === 'react' ? 'bg-sky-100 text-sky-700'
+                     : engine === 'static' ? 'bg-emerald-100 text-emerald-700'
+                     : 'bg-violet-100 text-violet-700';
+    const badgeText = engine === 'react' ? 'React'
+                    : engine === 'static' ? 'Static'
+                    : 'API';
     return (
       <div className="flex h-full flex-col">
-        {renderToolbar('In-browser preview', (
-          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
-            Preview
+        {renderToolbar(engineLabel, (
+          <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${badgeColor}`}>
+            {badgeText}
           </span>
         ))}
         <iframe
@@ -2216,7 +1781,7 @@ function PreviewTab({ project, files }) {
           srcDoc={previewHtml}
           title="App Preview"
           className="flex-1 border-0"
-          sandbox="allow-scripts allow-modals"
+          sandbox={engine === 'express' ? 'allow-scripts' : 'allow-scripts allow-modals'}
         />
       </div>
     );
