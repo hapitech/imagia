@@ -151,6 +151,83 @@ class OpenAIService {
   }
 
   /**
+   * Generate a completion with tool-calling support.
+   *
+   * @param {Object} options
+   * @param {Array} options.messages - Full conversation messages array
+   * @param {Array} options.tools - Tool definitions in OpenAI format
+   * @param {string} [options.toolChoice] - 'auto', 'none', or specific tool
+   * @param {string} [options.model] - Model to use
+   * @param {number} [options.maxTokens] - Max tokens
+   * @param {number} [options.temperature] - Sampling temperature
+   * @returns {Promise<{message: {role: string, content: string, toolCalls: Array}, usage: Object, model: string, finishReason: string}>}
+   */
+  async generateWithTools(options) {
+    const {
+      messages,
+      tools,
+      toolChoice = 'auto',
+      model = DEFAULT_MODEL,
+      maxTokens = 8192,
+      temperature = 0.3,
+    } = options;
+
+    if (!config.openaiApiKey) {
+      throw new Error('OpenAI API key not configured. Set OPENAI_API_KEY environment variable.');
+    }
+
+    const params = {
+      model,
+      messages,
+      max_tokens: maxTokens,
+      temperature,
+      tools,
+      tool_choice: toolChoice,
+    };
+
+    const response = await this.client.chat.completions.create(params);
+
+    const choice = response.choices?.[0] || {};
+    const msg = choice.message || {};
+
+    // Normalize tool_calls to toolCalls
+    const toolCalls = (msg.tool_calls || []).map((tc) => ({
+      id: tc.id,
+      name: tc.function?.name,
+      arguments: typeof tc.function?.arguments === 'string'
+        ? JSON.parse(tc.function.arguments)
+        : tc.function?.arguments || {},
+    }));
+
+    const usage = {
+      inputTokens: response.usage?.prompt_tokens || 0,
+      outputTokens: response.usage?.completion_tokens || 0,
+      totalTokens: response.usage?.total_tokens || 0,
+    };
+
+    const finishReason = choice.finish_reason === 'tool_calls' ? 'tool_calls' : choice.finish_reason || 'stop';
+
+    logger.info('OpenAI tool-calling generation complete', {
+      model,
+      toolCalls: toolCalls.length,
+      finishReason,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+    });
+
+    return {
+      message: {
+        role: msg.role || 'assistant',
+        content: msg.content || '',
+        toolCalls,
+      },
+      usage,
+      model,
+      finishReason,
+    };
+  }
+
+  /**
    * Extract JSON from a response that may be wrapped in markdown fences.
    * @private
    */

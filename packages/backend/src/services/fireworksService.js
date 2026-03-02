@@ -9,6 +9,7 @@ const logger = require('../config/logger');
 const API_ENDPOINT = 'https://api.fireworks.ai/inference/v1/chat/completions';
 const DEFAULT_MODEL = 'accounts/fireworks/models/kimi-k2p5';
 const REQUEST_TIMEOUT = 60000; // 60 seconds
+const TOOLS_TIMEOUT = 120000; // 120 seconds for tool-calling sessions
 
 // Pricing per million tokens
 const PRICING = {
@@ -28,6 +29,13 @@ class FireworksService {
       (params) => this._callApi(params),
       'fireworks-ai',
       { timeout: 90000, errorThreshold: 75, resetTimeout: 30000, volumeThreshold: 5 }
+    );
+
+    // Separate circuit breaker for tool-calling sessions to prevent cascade
+    this.toolsBreaker = createCircuitBreaker(
+      (params) => this._callApiWithTools(params),
+      'fireworks-ai-tools',
+      { timeout: 150000, errorThreshold: 75, resetTimeout: 30000, volumeThreshold: 3 }
     );
 
     if (!config.fireworksApiKey) {
@@ -158,6 +166,109 @@ class FireworksService {
 
     const timeout = new Promise((_, reject) => {
       setTimeout(() => reject(new Error('Fireworks API request timed out')), REQUEST_TIMEOUT);
+    });
+
+    const response = await Promise.race([apiCall, timeout]);
+
+    return response.data;
+  }
+
+  /**
+   * Generate a completion with tool-calling support.
+   * Uses a separate circuit breaker to prevent cascade from non-tool calls.
+   *
+   * @param {Object} options
+   * @param {Array} options.messages - Full conversation messages array
+   * @param {Array} options.tools - Tool definitions in OpenAI format
+   * @param {string} [options.toolChoice] - 'auto', 'none', or specific tool
+   * @param {string} [options.model] - Model to use
+   * @param {number} [options.maxTokens] - Max tokens
+   * @param {number} [options.temperature] - Sampling temperature
+   * @returns {Promise<{message: {role: string, content: string, toolCalls: Array}, usage: Object, model: string, finishReason: string}>}
+   */
+  async generateWithTools(options) {
+    const {
+      messages,
+      tools,
+      toolChoice = 'auto',
+      model = DEFAULT_MODEL,
+      maxTokens = 8192,
+      temperature = 0.3,
+    } = options;
+
+    if (!config.fireworksApiKey) {
+      throw new Error('Fireworks API key not configured. Set FIREWORKS_API_KEY environment variable.');
+    }
+
+    const params = { messages, tools, toolChoice, model, maxTokens, temperature };
+
+    const response = await this.toolsBreaker.fire(params);
+
+    const choice = response.choices?.[0] || {};
+    const msg = choice.message || {};
+
+    // Normalize tool_calls to toolCalls
+    const toolCalls = (msg.tool_calls || []).map((tc) => ({
+      id: tc.id,
+      name: tc.function?.name,
+      arguments: typeof tc.function?.arguments === 'string'
+        ? JSON.parse(tc.function.arguments)
+        : tc.function?.arguments || {},
+    }));
+
+    const usage = {
+      inputTokens: response.usage?.prompt_tokens || 0,
+      outputTokens: response.usage?.completion_tokens || 0,
+      totalTokens: response.usage?.total_tokens || 0,
+    };
+
+    // Map finish_reason: 'tool_calls' stays, 'stop' stays
+    const finishReason = choice.finish_reason === 'tool_calls' ? 'tool_calls' : choice.finish_reason || 'stop';
+
+    logger.info('Fireworks tool-calling generation complete', {
+      model,
+      toolCalls: toolCalls.length,
+      finishReason,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+    });
+
+    return {
+      message: {
+        role: msg.role || 'assistant',
+        content: msg.content || '',
+        toolCalls,
+      },
+      usage,
+      model,
+      finishReason,
+    };
+  }
+
+  /**
+   * Make API call with tools support and longer timeout.
+   * @private
+   */
+  async _callApiWithTools({ messages, tools, toolChoice, model, maxTokens, temperature }) {
+    const payload = {
+      model,
+      messages,
+      max_tokens: maxTokens,
+      temperature,
+      tools,
+      tool_choice: toolChoice,
+    };
+
+    const apiCall = axios.post(API_ENDPOINT, payload, {
+      headers: {
+        'Authorization': `Bearer ${config.fireworksApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: TOOLS_TIMEOUT,
+    });
+
+    const timeout = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Fireworks tools API request timed out')), TOOLS_TIMEOUT);
     });
 
     const response = await Promise.race([apiCall, timeout]);

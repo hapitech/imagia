@@ -307,6 +307,11 @@ class AppBuilderService {
    * Iterate on an existing project from a follow-up user message. Called by
    * buildWorker when the project already has files.
    *
+   * Uses a tool-calling agent (single LLM session) as the primary approach,
+   * with fallback to the monolithic single-call method.
+   *
+   * 4 stages: Load Context → Tool-Calling Agent → Persist Changes → Finalize
+   *
    * @param {Object} options
    * @param {string} options.projectId
    * @param {string} options.conversationId
@@ -318,7 +323,7 @@ class AppBuilderService {
   async iterateFromMessage(options) {
     const { projectId, conversationId, messageId, userId, correlationId, model } = options;
 
-    logger.info('Starting iteration from message (multi-step pipeline)', {
+    logger.info('Starting iteration from message (tool-calling agent)', {
       projectId,
       conversationId,
       messageId,
@@ -330,12 +335,12 @@ class AppBuilderService {
 
     try {
       // ---------------------------------------------------------------
-      // Stage 1: Analyze Request (0-8%)
+      // Stage 1: Load Context (0-5%)
       // ---------------------------------------------------------------
       await progressEmitter.emit(projectId, {
         progress: 2,
-        stage: 'analyzing',
-        message: 'Analyzing your request...',
+        stage: 'loading',
+        message: 'Loading project context...',
       });
 
       const userMessage = await this._getUserMessage(messageId);
@@ -352,164 +357,122 @@ class AppBuilderService {
           updated_at: db.fn.now(),
         });
 
-      const fileManifest = currentFiles.map((f) => f.path);
-
-      let analysis;
-      try {
-        analysis = await codeGeneratorService.analyzeChange(
-          userMessage,
-          fileManifest,
-          contextMd,
-          trackerOptions
-        );
-      } catch (analysisError) {
-        logger.warn('Change analysis failed, falling back to monolithic iteration', {
-          projectId,
-          error: analysisError.message,
-        });
-        analysis = null;
-      }
-
       await progressEmitter.emit(projectId, {
-        progress: 8,
-        stage: 'analyzing',
-        message: 'Request analyzed',
+        progress: 5,
+        stage: 'loading',
+        message: `Loaded ${currentFiles.length} project files`,
       });
 
       // ---------------------------------------------------------------
-      // Fallback: If analysis failed or returned no affected files,
-      // use the old monolithic iterateCode approach
+      // Stage 2: Tool-Calling Agent (5-85%)
       // ---------------------------------------------------------------
-      const hasAffectedFiles = analysis &&
-        ((analysis.affectedFiles && analysis.affectedFiles.length > 0) ||
-         (analysis.newFilesNeeded && analysis.newFilesNeeded.length > 0));
+      let changedFiles, summary, envVarsNeeded, pipeline;
 
-      if (!hasAffectedFiles) {
-        logger.info('No affected files identified, falling back to monolithic iteration', {
-          projectId,
-          correlationId,
-          complexity: analysis?.complexity,
-        });
-        return this._monolithicIterate(
-          projectId, conversationId, userMessage, currentFiles,
-          requirements, contextMd, trackerOptions
-        );
-      }
+      if (this._supportsToolCalling(model)) {
+        try {
+          await progressEmitter.emit(projectId, {
+            progress: 8,
+            stage: 'iterating',
+            message: 'Starting AI agent...',
+          });
 
-      // ---------------------------------------------------------------
-      // Stage 2: Plan Changes (8-15%)
-      // ---------------------------------------------------------------
-      await progressEmitter.emit(projectId, {
-        progress: 9,
-        stage: 'planning',
-        message: 'Planning changes...',
-      });
-
-      // Gather the content of affected files
-      const fileMap = new Map(currentFiles.map((f) => [f.path, f]));
-      const affectedFileContents = (analysis.affectedFiles || [])
-        .filter((path) => fileMap.has(path))
-        .map((path) => fileMap.get(path));
-
-      let changePlan;
-      try {
-        changePlan = await codeGeneratorService.planChanges(
-          userMessage,
-          analysis,
-          affectedFileContents,
-          contextMd,
-          trackerOptions
-        );
-      } catch (planError) {
-        logger.warn('Change planning failed, falling back to monolithic iteration', {
-          projectId,
-          error: planError.message,
-        });
-        return this._monolithicIterate(
-          projectId, conversationId, userMessage, currentFiles,
-          requirements, contextMd, trackerOptions
-        );
-      }
-
-      await progressEmitter.emit(projectId, {
-        progress: 15,
-        stage: 'planning',
-        message: `Planned ${changePlan.plan?.length || 0} file changes`,
-      });
-
-      // ---------------------------------------------------------------
-      // Stage 3: Generate Changes Per Group (15-55%)
-      // ---------------------------------------------------------------
-      const groups = changePlan.generationGroups || [];
-      // Fallback: if no groups were returned, generate all planned files as one group
-      const effectiveGroups = groups.length > 0
-        ? groups
-        : [{ group: 1, files: (changePlan.plan || []).map((p) => p.path), description: 'all changes' }];
-
-      let allChangedFiles = [];
-      let envVarsNeeded = [];
-
-      for (let gi = 0; gi < effectiveGroups.length; gi++) {
-        const group = effectiveGroups[gi];
-        const groupProgress = 15 + Math.round(((gi + 1) / effectiveGroups.length) * 40);
-
-        await progressEmitter.emit(projectId, {
-          progress: Math.min(groupProgress, 55),
-          stage: 'generating',
-          message: `Generating changes: ${group.description || `group ${gi + 1}`}...`,
-        });
-
-        // For each group, build a focused iteration prompt with ONLY relevant files
-        const groupPaths = new Set(group.files || []);
-        const relevantFiles = currentFiles.filter((f) => groupPaths.has(f.path));
-
-        // Also include files referenced by the plan but not in this group (as read-only context)
-        const allPlanPaths = new Set((changePlan.plan || []).map((p) => p.path));
-        const contextFilePaths = currentFiles
-          .filter((f) => !groupPaths.has(f.path) && allPlanPaths.has(f.path))
-          .slice(0, 5); // Limit context files
-
-        const groupFiles = [...relevantFiles, ...contextFilePaths];
-
-        const { files: groupChanges, summary: groupSummary, envVarsNeeded: groupEnvVars } =
-          await codeGeneratorService.iterateCode(
+          const agentResult = await codeGeneratorService.iterateWithTools(
             userMessage,
-            groupFiles,
-            requirements,
+            currentFiles,
             contextMd,
-            trackerOptions
+            trackerOptions,
+            // Progress callback
+            ({ type, detail }) => {
+              const progress = type === 'read_files' ? 20 : 50;
+              progressEmitter.emit(projectId, {
+                progress: Math.min(progress, 80),
+                stage: 'iterating',
+                message: detail,
+              }).catch(() => {}); // fire-and-forget
+            }
           );
 
-        allChangedFiles.push(...groupChanges);
-        if (groupEnvVars && groupEnvVars.length > 0) {
-          envVarsNeeded.push(...groupEnvVars);
+          changedFiles = agentResult.changedFiles;
+          summary = agentResult.summary;
+          envVarsNeeded = agentResult.envVarsNeeded;
+          pipeline = 'tool-calling';
+
+          logger.info('Tool-calling agent succeeded', {
+            projectId,
+            correlationId,
+            changedFiles: changedFiles.length,
+            turnCount: agentResult.turnCount,
+            totalTokens: agentResult.tokenUsage?.totalTokens,
+          });
+        } catch (toolError) {
+          logger.warn('Tool-calling agent failed, falling back to monolithic iteration', {
+            projectId,
+            correlationId,
+            error: toolError.message,
+          });
+
+          // Fall back to monolithic approach
+          return this._monolithicIterate(
+            projectId, conversationId, userMessage, currentFiles,
+            requirements, contextMd, trackerOptions
+          );
         }
+      } else {
+        // Model doesn't support tool calling, use monolithic
+        logger.info('Model does not support tool calling, using monolithic iteration', {
+          projectId,
+          model,
+        });
+        return this._monolithicIterate(
+          projectId, conversationId, userMessage, currentFiles,
+          requirements, contextMd, trackerOptions
+        );
       }
 
-      // Deduplicate env vars
-      envVarsNeeded = [...new Set(envVarsNeeded)];
+      // If no files were changed, still finalize successfully
+      if (!changedFiles || changedFiles.length === 0) {
+        await db('projects')
+          .where('id', projectId)
+          .update({
+            status: 'draft',
+            build_progress: 100,
+            current_build_stage: 'complete',
+            updated_at: db.fn.now(),
+          });
+
+        await this._storeAssistantMessage(conversationId,
+          summary || 'I reviewed your project but no file changes were needed.', {
+            type: 'iteration-complete',
+            filesChanged: 0,
+            pipeline,
+          });
+
+        await progressEmitter.emit(projectId, {
+          progress: 100,
+          stage: 'complete',
+          message: 'Complete — no changes needed',
+        });
+
+        return { success: true, filesChanged: 0, summary: summary || 'No changes needed' };
+      }
 
       await progressEmitter.emit(projectId, {
-        progress: 55,
-        stage: 'generating',
-        message: `Generated ${allChangedFiles.length} file changes`,
+        progress: 85,
+        stage: 'iterating',
+        message: `Agent completed: ${changedFiles.length} file(s) changed`,
       });
 
       // ---------------------------------------------------------------
-      // Stage 4: Apply Changes (55-65%)
+      // Stage 3: Persist Changes to DB (85-90%)
       // ---------------------------------------------------------------
+      await progressEmitter.emit(projectId, {
+        progress: 86,
+        stage: 'applying',
+        message: 'Saving changes...',
+      });
+
       let appliedCount = 0;
-
-      for (let i = 0; i < allChangedFiles.length; i++) {
-        const file = allChangedFiles[i];
-        const progressPct = 55 + Math.round(((i + 1) / allChangedFiles.length) * 10);
-
-        await progressEmitter.emit(projectId, {
-          progress: Math.min(progressPct, 65),
-          stage: 'applying',
-          message: `Applying changes to ${file.path}...`,
-        });
-
+      for (const file of changedFiles) {
         if (file.action === 'delete') {
           await db('project_files')
             .where({ project_id: projectId, file_path: file.path })
@@ -521,66 +484,18 @@ class AppBuilderService {
         appliedCount++;
       }
 
-      if (envVarsNeeded.length > 0) {
+      if (envVarsNeeded && envVarsNeeded.length > 0) {
         await this._appendEnvVars(projectId, envVarsNeeded, trackerOptions);
       }
 
       await progressEmitter.emit(projectId, {
-        progress: 65,
-        stage: 'applying',
-        message: `Applied ${appliedCount} file changes`,
-      });
-
-      // ---------------------------------------------------------------
-      // Stage 5: Validate (65-75%)
-      // ---------------------------------------------------------------
-      await progressEmitter.emit(projectId, {
-        progress: 66,
-        stage: 'validating',
-        message: 'Validating generated code...',
-      });
-
-      let allFilesAfterApply = await this._getProjectFiles(projectId);
-      let validation = codeValidatorService.validateChanges(allChangedFiles, allFilesAfterApply);
-
-      logger.info('Validation result', {
-        projectId,
-        valid: validation.valid,
-        errorCount: validation.errors.length,
-        warningCount: validation.warnings.length,
-      });
-
-      await progressEmitter.emit(projectId, {
-        progress: 75,
-        stage: 'validating',
-        message: validation.valid
-          ? 'Code validation passed'
-          : `Found ${validation.errors.length} issue(s), auto-fixing...`,
-      });
-
-      // ---------------------------------------------------------------
-      // Stage 6: Auto-Fix Loop (75-90%)
-      // ---------------------------------------------------------------
-      let fixSummary = '';
-      if (!validation.valid) {
-        const fixResult = await this._autoFixLoop(
-          projectId, validation, allFilesAfterApply, trackerOptions
-        );
-        fixSummary = fixResult.summary;
-        appliedCount += fixResult.fixedCount;
-
-        // Re-fetch files after fixes
-        allFilesAfterApply = await this._getProjectFiles(projectId);
-      }
-
-      await progressEmitter.emit(projectId, {
         progress: 90,
-        stage: 'validating',
-        message: 'Validation complete',
+        stage: 'applying',
+        message: `Saved ${appliedCount} file changes`,
       });
 
       // ---------------------------------------------------------------
-      // Stage 7: Finalize (90-100%)
+      // Stage 4: Version Snapshot + Context Update + Finalize (90-100%)
       // ---------------------------------------------------------------
       await progressEmitter.emit(projectId, {
         progress: 91,
@@ -588,14 +503,13 @@ class AppBuilderService {
         message: 'Creating version snapshot...',
       });
 
+      const allFilesAfterApply = await this._getProjectFiles(projectId);
       const versionNumber = await this._getNextVersionNumber(projectId);
       const snapshot = allFilesAfterApply.map((f) => ({
         path: f.path,
         checksum: generateContentHash(f.content),
         language: f.language,
       }));
-
-      const summary = changePlan.summary || analysis.summary || '';
 
       await db('project_versions').insert({
         project_id: projectId,
@@ -625,7 +539,7 @@ class AppBuilderService {
         });
 
       // Update requirements in settings if env vars were added
-      if (envVarsNeeded.length > 0) {
+      if (envVarsNeeded && envVarsNeeded.length > 0) {
         const updatedSettings = await this._getProjectSettings(projectId);
         const existingEnvVars = updatedSettings.requirements?.envVarsNeeded || [];
         const mergedEnvVars = [...new Set([...existingEnvVars, ...envVarsNeeded])];
@@ -642,22 +556,13 @@ class AppBuilderService {
 
       let iterationMessage = `I've updated your app. Here's what changed:\n\n${summary}\n\n` +
         `${appliedCount} file(s) were modified.`;
-      if (fixSummary) {
-        iterationMessage += `\n\n*Auto-fix applied:* ${fixSummary}`;
-      }
 
       await this._storeAssistantMessage(conversationId, iterationMessage, {
         type: 'iteration-complete',
         filesChanged: appliedCount,
         versionNumber,
         summary,
-        pipeline: 'multi-step',
-        stages: {
-          analysis: analysis.changeType,
-          planSteps: changePlan.plan?.length,
-          validationErrors: validation.errors.length,
-          autoFixed: !!fixSummary,
-        },
+        pipeline,
       });
 
       await progressEmitter.emit(projectId, {
@@ -666,14 +571,12 @@ class AppBuilderService {
         message: 'Build complete!',
       });
 
-      logger.info('Multi-step iteration completed successfully', {
+      logger.info('Tool-calling iteration completed successfully', {
         projectId,
         correlationId,
         filesChanged: appliedCount,
         versionNumber,
-        pipeline: 'multi-step',
-        validationErrors: validation.errors.length,
-        autoFixed: !!fixSummary,
+        pipeline,
       });
 
       return {
@@ -729,12 +632,33 @@ class AppBuilderService {
   }
 
   // ===========================================================================
-  // Multi-step pipeline helpers
+  // Tool-calling helpers
   // ===========================================================================
 
   /**
+   * Check whether the given model supports tool calling.
+   * Models that support it: Kimi K2.5, GPT-4o, Claude Sonnet, Llama 3.3, Qwen3 Coder.
+   * Models that don't: FLUX.1 (image only), very small models.
+   * @private
+   */
+  _supportsToolCalling(model) {
+    // If no model specified or 'auto', default to tool calling (Kimi K2.5 supports it)
+    if (!model || model === 'auto') return true;
+
+    const noToolModels = [
+      'accounts/fireworks/models/flux-1-dev',
+      'accounts/fireworks/models/qwen3-8b', // Too small for reliable tool use
+    ];
+
+    if (noToolModels.includes(model)) return false;
+
+    // All major code/chat models support tool calling
+    return true;
+  }
+
+  /**
    * Fallback: monolithic iteration using the original single-call approach.
-   * Used when analysis returns no affected files or when analysis/planning fails.
+   * Used when tool-calling fails or when the model doesn't support it.
    * @private
    */
   async _monolithicIterate(projectId, conversationId, userMessage, currentFiles, requirements, contextMd, trackerOptions) {

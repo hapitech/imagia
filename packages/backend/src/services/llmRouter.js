@@ -235,6 +235,98 @@ class LLMRouter {
   }
 
   /**
+   * Route a tool-calling request to the appropriate provider.
+   * Falls back to secondary provider if primary fails.
+   *
+   * @param {string} taskType - The task type for routing
+   * @param {Object} options - { messages, tools, toolChoice, model, maxTokens, temperature, modelOverride }
+   * @returns {Promise<{message: Object, usage: Object, model: string, finishReason: string, provider: string, fallbackUsed: boolean}>}
+   */
+  async routeWithTools(taskType, options) {
+    const { modelOverride, ...genOptions } = options;
+
+    // Determine primary and fallback providers
+    let primaryName, fallbackName, model;
+
+    if (modelOverride && modelOverride !== 'auto') {
+      primaryName = MODEL_TO_PROVIDER[modelOverride] || this._inferProvider(modelOverride);
+      model = modelOverride;
+      // Pick a different fallback
+      fallbackName = primaryName === 'fireworks' ? 'openai' : 'fireworks';
+    } else {
+      const route = ROUTING_TABLE[taskType] || ROUTING_TABLE['code-iteration'];
+      primaryName = route.primary;
+      fallbackName = route.fallback;
+      model = genOptions.model || route.model;
+    }
+
+    // Try primary
+    const primaryProvider = this.providers[primaryName];
+    if (primaryProvider && typeof primaryProvider.generateWithTools === 'function') {
+      try {
+        const result = await primaryProvider.generateWithTools({ ...genOptions, model });
+        return { ...result, provider: primaryName, fallbackUsed: false };
+      } catch (primaryError) {
+        logger.warn('Primary provider tool-calling failed, trying fallback', {
+          taskType,
+          primary: primaryName,
+          fallback: fallbackName,
+          error: primaryError.message,
+        });
+
+        // Try fallback
+        return this._fallbackWithTools(fallbackName, genOptions, taskType, primaryName, primaryError);
+      }
+    }
+
+    // Primary doesn't support tool calling, try fallback directly
+    return this._fallbackWithTools(fallbackName, genOptions, taskType, primaryName,
+      new Error(`Provider ${primaryName} does not support generateWithTools`));
+  }
+
+  /**
+   * Attempt tool-calling with a fallback provider.
+   * @private
+   */
+  async _fallbackWithTools(fallbackName, genOptions, taskType, primaryName, primaryError) {
+    const fallbackProvider = this.providers[fallbackName];
+
+    if (!fallbackProvider || typeof fallbackProvider.generateWithTools !== 'function') {
+      throw new Error(
+        `Tool-calling routing failed for "${taskType}": ` +
+        `primary (${primaryName}) error: ${primaryError.message}, ` +
+        `fallback (${fallbackName}) does not support generateWithTools`
+      );
+    }
+
+    try {
+      // Let fallback use its default model
+      const fallbackOptions = { ...genOptions };
+      delete fallbackOptions.model;
+
+      const result = await fallbackProvider.generateWithTools(fallbackOptions);
+      return { ...result, provider: fallbackName, fallbackUsed: true };
+    } catch (fallbackError) {
+      throw new Error(
+        `Tool-calling routing failed for "${taskType}": ` +
+        `primary (${primaryName}) error: ${primaryError.message}, ` +
+        `fallback (${fallbackName}) error: ${fallbackError.message}`
+      );
+    }
+  }
+
+  /**
+   * Infer provider name from model ID string.
+   * @private
+   */
+  _inferProvider(modelId) {
+    if (modelId.startsWith('accounts/fireworks/')) return 'fireworks';
+    if (modelId.startsWith('claude-')) return 'anthropic';
+    if (modelId.startsWith('gpt-')) return 'openai';
+    return 'fireworks';
+  }
+
+  /**
    * Get a provider service instance by name.
    * @param {string} name - Provider name: 'anthropic', 'fireworks', 'openai'
    * @returns {Object} The provider service instance

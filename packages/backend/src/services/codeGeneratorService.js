@@ -1,11 +1,16 @@
 const logger = require('../config/logger');
 const llmRouter = require('./llmRouter');
 const promptTracker = require('./promptTracker');
+const ToolExecutor = require('./toolExecutor');
+const { TOOL_DEFINITIONS } = require('../utils/toolDefinitions');
 const { buildRequirementsPrompt, buildScaffoldPrompt } = require('../utils/prompts/appScaffold');
 const { buildFileGenerationPrompt, buildBatchFilePrompt } = require('../utils/prompts/codeGeneration');
 const { buildIterationPrompt } = require('../utils/prompts/codeIteration');
 const { buildChangeAnalysisPrompt, buildChangePlanPrompt } = require('../utils/prompts/changeAnalysis');
 const { buildCodeFixPrompt } = require('../utils/prompts/codeFix');
+
+const MAX_TOOL_TURNS = 15;
+const TOOL_SESSION_TIMEOUT = 8 * 60 * 1000; // 8 minutes
 
 /**
  * Extension-to-language mapping for file path inference.
@@ -503,6 +508,179 @@ class CodeGeneratorService {
       summary: parsed.summary || '',
       remainingIssues: parsed.remainingIssues || [],
     };
+  }
+
+  /**
+   * Tool-calling iteration agent. Runs a single LLM session where the model
+   * reads files on demand, writes changes, and validates them — all within
+   * one conversation. One model, one breaker, no cascade.
+   *
+   * @param {string} userMessage - The user's change request
+   * @param {Array<{path: string, content: string, language?: string}>} projectFiles - Current project files
+   * @param {string} contextMd - Project context markdown
+   * @param {Object} options
+   * @param {string} options.projectId
+   * @param {string} options.userId
+   * @param {string} [options.correlationId]
+   * @param {string} [options.model]
+   * @param {Function} [progressCallback] - Called with { type, detail } on tool execution
+   * @returns {Promise<{changedFiles: Array, summary: string, envVarsNeeded: Array, tokenUsage: Object, turnCount: number}>}
+   */
+  async iterateWithTools(userMessage, projectFiles, contextMd, options, progressCallback) {
+    const { projectId, correlationId, model } = options;
+
+    const executor = new ToolExecutor(projectFiles);
+    const fileManifest = executor.getFileManifest();
+
+    logger.info('Starting tool-calling iteration', {
+      projectId,
+      correlationId,
+      fileCount: fileManifest.length,
+      model,
+    });
+
+    // Build system prompt with file manifest and rules
+    const systemPrompt = this._buildToolSystemPrompt(fileManifest, contextMd);
+
+    // Initialize conversation
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userMessage },
+    ];
+
+    let totalUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+    let turnCount = 0;
+    const startTime = Date.now();
+
+    // Agent loop
+    for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+      // Check timeout
+      if (Date.now() - startTime > TOOL_SESSION_TIMEOUT) {
+        logger.warn('Tool-calling session timed out', { projectId, turn, elapsed: Date.now() - startTime });
+        break;
+      }
+
+      turnCount++;
+
+      const response = await llmRouter.routeWithTools('code-iteration', {
+        messages,
+        tools: TOOL_DEFINITIONS,
+        toolChoice: 'auto',
+        maxTokens: 8192,
+        temperature: 0.3,
+        modelOverride: model,
+      });
+
+      // Accumulate token usage
+      totalUsage.inputTokens += response.usage?.inputTokens || 0;
+      totalUsage.outputTokens += response.usage?.outputTokens || 0;
+      totalUsage.totalTokens += response.usage?.totalTokens || 0;
+
+      const { message: assistantMsg, finishReason } = response;
+
+      // If no tool calls, the agent is done
+      if (!assistantMsg.toolCalls || assistantMsg.toolCalls.length === 0 || finishReason === 'stop') {
+        logger.info('Tool-calling agent finished', {
+          projectId,
+          turn: turnCount,
+          finishReason,
+          totalTokens: totalUsage.totalTokens,
+        });
+        break;
+      }
+
+      // Context full
+      if (finishReason === 'length') {
+        logger.warn('Tool-calling agent hit context limit', { projectId, turn: turnCount });
+        break;
+      }
+
+      // Append assistant message to conversation (with tool_calls in provider format)
+      messages.push({
+        role: 'assistant',
+        content: assistantMsg.content || '',
+        tool_calls: assistantMsg.toolCalls.map((tc) => ({
+          id: tc.id,
+          type: 'function',
+          function: {
+            name: tc.name,
+            arguments: JSON.stringify(tc.arguments),
+          },
+        })),
+      });
+
+      // Execute each tool call and append results
+      for (const toolCall of assistantMsg.toolCalls) {
+        const { result } = executor.execute(toolCall.name, toolCall.arguments);
+
+        // Append tool result message
+        messages.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: result,
+        });
+
+        // Emit progress
+        if (progressCallback) {
+          try {
+            progressCallback({
+              type: toolCall.name,
+              detail: toolCall.name === 'read_files'
+                ? `Reading ${toolCall.arguments.paths?.length || 0} file(s)`
+                : `Applied ${toolCall.arguments.files?.length || 0} change(s)`,
+            });
+          } catch (cbErr) {
+            // Don't let callback errors break the loop
+          }
+        }
+      }
+    }
+
+    const results = executor.getResults();
+
+    logger.info('Tool-calling iteration complete', {
+      projectId,
+      correlationId,
+      turnCount,
+      changedFiles: results.changedFiles.length,
+      totalTokens: totalUsage.totalTokens,
+      elapsedMs: Date.now() - startTime,
+    });
+
+    return {
+      ...results,
+      tokenUsage: totalUsage,
+      turnCount,
+    };
+  }
+
+  /**
+   * Build the system prompt for the tool-calling agent.
+   * @private
+   */
+  _buildToolSystemPrompt(fileManifest, contextMd) {
+    const manifestList = fileManifest.map((p) => `  ${p}`).join('\n');
+
+    let prompt = `You are an expert full-stack developer. You modify a web application by reading files and applying changes using the provided tools.
+
+## Project Files
+${manifestList}
+
+## Rules
+1. ALWAYS read files with read_files before modifying them. Never guess at file contents.
+2. Return COMPLETE file contents in apply_changes, not diffs or partial snippets.
+3. If apply_changes reports validation errors, fix them immediately in a follow-up apply_changes call.
+4. You may create new files with action "create" — ensure imports reference them correctly.
+5. You may delete files with action "delete" — update imports in other files accordingly.
+6. When you are done making all changes, respond with a text summary of what you did. Do NOT call any tools in your final message.
+7. Keep changes focused and minimal — only modify what the user requested.
+8. Use modern JavaScript/React patterns (ES modules, functional components, hooks).`;
+
+    if (contextMd) {
+      prompt += `\n\n## Project Context\n${contextMd}`;
+    }
+
+    return prompt;
   }
 
   /**
