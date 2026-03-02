@@ -661,20 +661,27 @@ class CodeGeneratorService {
   _buildToolSystemPrompt(fileManifest, contextMd) {
     const manifestList = fileManifest.map((p) => `  ${p}`).join('\n');
 
-    let prompt = `You are an expert full-stack developer. You modify a web application by reading files and applying changes using the provided tools.
+    let prompt = `You are an expert full-stack developer. The user asks you to modify a web application. You MUST use the provided tools to make changes — never just describe changes in text.
+
+## Workflow
+1. Use read_files to read the files you need to understand
+2. Use apply_changes to write your modifications (with COMPLETE file contents)
+3. If apply_changes reports validation errors, fix them with another apply_changes call
+4. After all changes are applied, respond with a brief text summary
 
 ## Project Files
 ${manifestList}
 
 ## Rules
 1. ALWAYS read files with read_files before modifying them. Never guess at file contents.
-2. Return COMPLETE file contents in apply_changes, not diffs or partial snippets.
-3. If apply_changes reports validation errors, fix them immediately in a follow-up apply_changes call.
-4. You may create new files with action "create" — ensure imports reference them correctly.
-5. You may delete files with action "delete" — update imports in other files accordingly.
-6. When you are done making all changes, respond with a text summary of what you did. Do NOT call any tools in your final message.
+2. You MUST call apply_changes to implement the user's request. Do NOT skip this step or only describe changes in text.
+3. Return COMPLETE file contents in apply_changes, not diffs or partial snippets.
+4. If apply_changes reports validation errors, fix them immediately in a follow-up apply_changes call.
+5. You may create new files with action "create" — ensure imports reference them correctly.
+6. You may delete files with action "delete" — update imports in other files accordingly.
 7. Keep changes focused and minimal — only modify what the user requested.
-8. Use modern JavaScript/React patterns (ES modules, functional components, hooks).`;
+8. Use modern JavaScript/React patterns (ES modules, functional components, hooks).
+9. Your final message (after applying all changes) should be a text summary with NO tool calls.`;
 
     if (contextMd) {
       prompt += `\n\n## Project Context\n${contextMd}`;
