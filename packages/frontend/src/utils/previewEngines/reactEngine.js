@@ -71,6 +71,12 @@ export function buildReactPreview(rawFileList, filePrefix = null) {
     c = c.replace(/^export\s+default\s+function\s+\w+/gm, `function ${name}`);
     c = c.replace(/^export\s+default\s+function\s*(?=\()/gm, `function ${name}`);
     c = c.replace(/^export\s+default\s+class\s+\w+/gm, `var ${name} = class ${name}`);
+    // Strip `export default Name;` when Name is already declared in the file
+    c = c.replace(/^export\s+default\s+([A-Z]\w*)\s*;?\s*$/gm, (match, ident) => {
+      // If the identifier is already defined above, just remove the export line
+      const declared = new RegExp(`(?:function|var|class)\\s+${ident}\\b`).test(c);
+      return declared ? '' : `var ${name} = ${ident};`;
+    });
     c = c.replace(/^export\s+default\s+/gm, `var ${name} = `);
     c = c.replace(/^export\s+(const|let|var|function|class)\s+/gm, '$1 ');
     c = c.replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
