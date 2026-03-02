@@ -18,6 +18,7 @@ import {
  * - Sending new messages (with optimistic UI updates)
  * - Detected secrets flow (pause, collect values, save, retry)
  * - Refreshing messages from the server
+ * - Polling fallback when SSE drops
  *
  * @param {string} projectId - UUID of the current project
  */
@@ -35,6 +36,66 @@ export default function useChat(projectId) {
   // Keep a ref to the latest pending message so the secrets flow can retry it.
   const pendingMessageRef = useRef(null);
   const pendingAttachmentIdsRef = useRef([]);
+
+  // Polling fallback refs
+  const pollingRef = useRef(null);
+  const conversationIdRef = useRef(null);
+
+  // Keep conversationId ref in sync for use in polling interval
+  useEffect(() => {
+    conversationIdRef.current = conversationId;
+  }, [conversationId]);
+
+  // Clean up polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
+    };
+  }, []);
+
+  // ---- Polling fallback helper ------------------------------------------------
+  // Starts polling every 3s after a message is sent. Stops when an assistant
+  // reply arrives, when SSE triggers refreshMessages, or after 5 minutes.
+  // Uses refs to avoid dependency on reactive state.
+  function startResponsePolling(messageCountAtSend) {
+    if (pollingRef.current) clearInterval(pollingRef.current);
+
+    let elapsed = 0;
+    const POLL_INTERVAL = 3000;
+    const MAX_POLL_TIME = 5 * 60 * 1000;
+
+    pollingRef.current = setInterval(async () => {
+      elapsed += POLL_INTERVAL;
+      const convId = conversationIdRef.current;
+      if (elapsed > MAX_POLL_TIME || !convId) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+        return;
+      }
+
+      try {
+        const msgsResponse = await getMessages(convId);
+        const msgList = Array.isArray(msgsResponse)
+          ? msgsResponse
+          : msgsResponse.messages || [];
+
+        // Check if we got a new assistant message beyond what was there when we sent
+        const hasNewAssistant = msgList.length > messageCountAtSend &&
+          msgList.some((m, i) => i >= messageCountAtSend && m.role === 'assistant');
+
+        if (hasNewAssistant) {
+          setMessages(msgList);
+          clearInterval(pollingRef.current);
+          pollingRef.current = null;
+        }
+      } catch {
+        // Silently retry on next interval
+      }
+    }, POLL_INTERVAL);
+  }
 
   // ---- Bootstrap conversation on mount ----------------------------------------
   useEffect(() => {
@@ -189,6 +250,11 @@ export default function useChat(projectId) {
         pendingMessageRef.current = null;
         pendingAttachmentIdsRef.current = [];
 
+        // Start polling fallback for assistant response (in case SSE drops).
+        // Pass current message count so polling knows when a new assistant msg arrives.
+        // +1 because we just added the optimistic user message above.
+        startResponsePolling(messages.length + 1);
+
         return response.job_id || null;
       } catch (err) {
         console.error('useChat: sendMessage failed', err);
@@ -211,7 +277,7 @@ export default function useChat(projectId) {
         setIsSending(false);
       }
     },
-    [conversationId, projectId, pendingAttachments],
+    [conversationId, projectId, pendingAttachments, messages.length],
   );
 
   // ---- Save secrets then retry the pending message ----------------------------
@@ -283,6 +349,12 @@ export default function useChat(projectId) {
         ? msgsResponse
         : msgsResponse.messages || [];
       setMessages(msgList);
+
+      // Stop polling — SSE-triggered refresh succeeded
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
     } catch (err) {
       console.error('useChat: refreshMessages failed', err);
     }
