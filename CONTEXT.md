@@ -56,12 +56,19 @@ AI-powered app builder (like replit.com) that generates code from natural langua
 - codeGeneratorService.js, appBuilderService.js (913 lines)
 - buildWorker.js with SSE progress
 - useChat.js hook with attachments support
-- ProjectBuilder.jsx with chat UI, file viewer, secrets, file uploads
+- ProjectBuilder.jsx with chat UI, file viewer, secrets, file uploads, delete project with confirmation
+- **Multi-engine preview system** (`packages/frontend/src/utils/previewEngines/`):
+  - `detectEngine.js` - Detects project type from `app_type` + file analysis, monorepo detection (scans for frontend subdirectories, returns `filePrefix` for path stripping)
+  - `reactEngine.js` - In-browser React preview: strips imports, rewrites exports, collects npm deps via esm.sh import maps, transpiles with Babel standalone + Tailwind CDN, renders in iframe. Handles const/let→var dedup, shimmed packages (react-router-dom, next/*), TypeScript type stripping, cross-package identifier dedup
+  - `staticEngine.js` - Static HTML preview: finds index.html, inlines local `<link>` CSS and `<script>` JS, adds error boundary
+  - `expressEngine.js` - API docs preview: extracts Express routes via regex, parses package.json, generates styled HTML with color-coded HTTP methods, dependency list, file tree
+  - `index.js` - Public API: `buildPreview(project, fileList)` → `{ html, engine, engineLabel }`. Fallback chain: React → Static → Express
+  - Engine badge colors in PreviewTab toolbar: React (sky), Static (emerald), Express (violet)
 
 ### Phase 3 (Deployment + GitHub + Marketing) - DONE
 - **Railway deployment**: `railwayService.js` (GraphQL API - create project/service, deploy, poll status, generate domain, custom domains), `deployWorker.js` (Bull worker with 7 stages, SSE progress, auto-assigns `*.imagia.net` subdomain via Cloudflare KV, auto-triggers marketing gen), `routes/deployments.js` (queue deploy, status, history, logs, custom domain, costs)
 - **Cloudflare integration**: `cloudflareService.js` (Workers KV for subdomain routing, DNS records, Custom Hostnames for user custom domains), `routes/domains.js` (list domains, add/remove custom domain, SSL status, verify)
-- **GitHub integration**: `githubService.js` (Octokit - OAuth, importRepo, pushToGitHub, pullFromGitHub, createRepo, syncStatus), `routes/github.js` (connect, callback, list repos, import, push, pull, create-repo, sync-status, disconnect)
+- **GitHub integration**: `githubService.js` (Octokit - OAuth, importRepo, pushToGitHub, pullFromGitHub, createRepo, syncStatus; smart-sort import prioritizes frontend files (src/, pages/, components/, JSX) over backend, 200-file limit), `routes/github.js` (connect, callback, list repos, import, push, pull, create-repo, sync-status, disconnect)
 - **Screenshot/Video**: `screenshotService.js` (Playwright - desktop full page, mobile, multi-state), `videoService.js` (Playwright video recording with step-by-step demo)
 - **Marketing pipeline**: `marketingWorker.js` (generates screenshots, video demo, landing page, social posts for 4 platforms, ad copy for 3 platforms, email templates for 3 types), `routes/marketing.js` (generate, list/get/delete assets, regenerate)
 - **Cost tracking**: `costTracker.js` (tracks deployment, compute, storage, LLM costs per-project, user-level cost summary with daily trends)
@@ -98,4 +105,4 @@ AI-powered app builder (like replit.com) that generates code from natural langua
 See `.env.example` for full list. Priority: CLERK keys, DATABASE_URL, REDIS_URL, ANTHROPIC_API_KEY, FIREWORKS_API_KEY, OPENAI_API_KEY, SECRETS_ENCRYPTION_KEY (32-byte hex), RAILWAY_API_TOKEN, GITHUB_CLIENT_ID + SECRET, CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ZONE_ID, CLOUDFLARE_KV_NAMESPACE_ID, TWITTER_CLIENT_ID + SECRET, LINKEDIN_CLIENT_ID + SECRET, FACEBOOK_APP_ID + SECRET
 
 ## File Count
-~120 source files across 3 packages
+~150 source files across 3 packages
