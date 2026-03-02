@@ -152,8 +152,23 @@ class GitHubService {
       (item) => item.type === 'blob' && item.size < 500000 // Skip files > 500KB
     );
 
-    // Fetch file contents (limit to 100 files for large repos)
-    const filesToFetch = files.slice(0, 100);
+    // Smart-sort: prioritize frontend files for monorepos so the 100-file
+    // limit doesn't fill up on backend scripts before reaching the UI code.
+    const prioritize = (path) => {
+      const p = path.toLowerCase();
+      // Frontend dirs first
+      if (/\/(src|pages|components|hooks|app)\//i.test(p)) return 0;
+      if (/(front|client|web|ui)\//i.test(p)) return 1;
+      // Key config files
+      if (/package\.json$/.test(p) || /index\.html$/.test(p)) return 2;
+      if (/\.(jsx|tsx)$/.test(p)) return 3;
+      // Everything else
+      return 4;
+    };
+    const sortedFiles = [...files].sort((a, b) => prioritize(a.path) - prioritize(b.path));
+
+    // Fetch file contents (limit to 200 files for large repos)
+    const filesToFetch = sortedFiles.slice(0, 200);
     const fileContents = [];
 
     for (const file of filesToFetch) {
