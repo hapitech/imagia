@@ -437,10 +437,9 @@ class AppBuilderService {
       if (!changedFiles || changedFiles.length === 0) {
         const responseText = agentResponse || summary || 'I reviewed your project. Let me know if you need anything else.';
 
-        logger.info('Storing no-changes response', {
+        logger.debug('Storing no-changes response', {
           projectId,
           responseTextLength: responseText.length,
-          responseTextPreview: responseText.substring(0, 200),
           hasAgentResponse: !!agentResponse,
           hasSummary: !!summary,
         });

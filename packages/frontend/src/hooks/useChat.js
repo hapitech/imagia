@@ -57,10 +57,12 @@ export default function useChat(projectId) {
   }, []);
 
   // ---- Polling fallback helper ------------------------------------------------
-  // Starts polling every 3s after a message is sent. Stops when an assistant
-  // reply arrives, when SSE triggers refreshMessages, or after 5 minutes.
-  // Uses refs to avoid dependency on reactive state.
-  function startResponsePolling(messageCountAtSend) {
+  // Starts polling every 3s after a message is sent. Stops when the LAST message
+  // in the conversation is an assistant message (meaning the current build has
+  // completed and stored its response). Also stops when SSE triggers
+  // refreshMessages, or after 5 minutes. Uses refs to avoid dependency on
+  // reactive state.
+  function startResponsePolling() {
     if (pollingRef.current) clearInterval(pollingRef.current);
 
     let elapsed = 0;
@@ -82,11 +84,11 @@ export default function useChat(projectId) {
           ? msgsResponse
           : msgsResponse.messages || [];
 
-        // Check if we got a new assistant message beyond what was there when we sent
-        const hasNewAssistant = msgList.length > messageCountAtSend &&
-          msgList.some((m, i) => i >= messageCountAtSend && m.role === 'assistant');
-
-        if (hasNewAssistant) {
+        // The build is done when the LAST message is from the assistant.
+        // This avoids false positives from old unfetched assistant messages
+        // that accumulated from previous builds where SSE dropped.
+        const lastMsg = msgList[msgList.length - 1];
+        if (lastMsg && lastMsg.role === 'assistant') {
           setMessages(msgList);
           clearInterval(pollingRef.current);
           pollingRef.current = null;
@@ -251,9 +253,8 @@ export default function useChat(projectId) {
         pendingAttachmentIdsRef.current = [];
 
         // Start polling fallback for assistant response (in case SSE drops).
-        // Pass current message count so polling knows when a new assistant msg arrives.
-        // +1 because we just added the optimistic user message above.
-        startResponsePolling(messages.length + 1);
+        // Polling checks if the last message is from the assistant.
+        startResponsePolling();
 
         return response.job_id || null;
       } catch (err) {
@@ -277,7 +278,7 @@ export default function useChat(projectId) {
         setIsSending(false);
       }
     },
-    [conversationId, projectId, pendingAttachments, messages.length],
+    [conversationId, projectId, pendingAttachments],
   );
 
   // ---- Save secrets then retry the pending message ----------------------------
