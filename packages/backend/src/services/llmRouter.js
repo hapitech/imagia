@@ -56,6 +56,21 @@ const ROUTING_TABLE = {
     model: 'accounts/fireworks/models/deepseek-v3',
     fallback: 'openai',
   },
+  'change-analysis': {
+    primary: 'fireworks',
+    model: 'accounts/fireworks/models/deepseek-v3',
+    fallback: 'openai',
+  },
+  'change-planning': {
+    primary: 'fireworks',
+    model: 'accounts/fireworks/models/deepseek-v3',
+    fallback: 'openai',
+  },
+  'code-fix': {
+    primary: 'fireworks',
+    model: 'accounts/fireworks/models/kimi-k2p5',
+    fallback: 'openai',
+  },
 };
 
 /**

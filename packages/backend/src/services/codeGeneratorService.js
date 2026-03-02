@@ -4,6 +4,8 @@ const promptTracker = require('./promptTracker');
 const { buildRequirementsPrompt, buildScaffoldPrompt } = require('../utils/prompts/appScaffold');
 const { buildFileGenerationPrompt, buildBatchFilePrompt } = require('../utils/prompts/codeGeneration');
 const { buildIterationPrompt } = require('../utils/prompts/codeIteration');
+const { buildChangeAnalysisPrompt, buildChangePlanPrompt } = require('../utils/prompts/changeAnalysis');
+const { buildCodeFixPrompt } = require('../utils/prompts/codeFix');
 
 /**
  * Extension-to-language mapping for file path inference.
@@ -333,6 +335,174 @@ class CodeGeneratorService {
     });
 
     return { files, summary, envVarsNeeded };
+  }
+
+  /**
+   * Analyze a change request to identify affected files (Stage 1 of multi-step pipeline).
+   * Uses a fast/cheap model since it only receives file paths, not content.
+   *
+   * @param {string} userMessage - The user's change request
+   * @param {Array<string>} fileManifest - Array of file paths in the project
+   * @param {string} contextMd - Project context markdown
+   * @param {Object} options
+   * @returns {Promise<{changeType: string, summary: string, affectedFiles: Array, newFilesNeeded: Array, complexity: string}>}
+   */
+  async analyzeChange(userMessage, fileManifest, contextMd, options) {
+    const { projectId, userId, correlationId } = options;
+
+    logger.info('Analyzing change request', { projectId, correlationId, fileCount: fileManifest.length });
+
+    const { systemMessage, prompt, maxTokens, temperature } =
+      buildChangeAnalysisPrompt(userMessage, fileManifest, contextMd);
+
+    const result = await promptTracker.track({
+      projectId,
+      userId,
+      taskType: 'change-analysis',
+      correlationId,
+      prompt,
+      systemMessage,
+      callFn: () =>
+        llmRouter.route('change-analysis', {
+          systemMessage,
+          prompt,
+          maxTokens,
+          temperature,
+          responseFormat: 'json',
+        }),
+    });
+
+    const analysis = this._parseJsonResponse(result.content);
+
+    logger.info('Change analysis complete', {
+      projectId,
+      correlationId,
+      promptLogId: result.promptLogId,
+      changeType: analysis.changeType,
+      affectedCount: analysis.affectedFiles?.length,
+      newFilesCount: analysis.newFilesNeeded?.length,
+      complexity: analysis.complexity,
+    });
+
+    return analysis;
+  }
+
+  /**
+   * Plan changes based on analysis results (Stage 2 of multi-step pipeline).
+   * Uses a fast/cheap model with the affected file content.
+   *
+   * @param {string} userMessage - The user's change request
+   * @param {Object} analysis - Stage 1 analysis result
+   * @param {Array<{path: string, content: string}>} affectedFiles - Full content of affected files
+   * @param {string} contextMd - Project context markdown
+   * @param {Object} options
+   * @returns {Promise<{plan: Array, summary: string, generationGroups: Array}>}
+   */
+  async planChanges(userMessage, analysis, affectedFiles, contextMd, options) {
+    const { projectId, userId, correlationId } = options;
+
+    logger.info('Planning changes', { projectId, correlationId, affectedCount: affectedFiles.length });
+
+    const { systemMessage, prompt, maxTokens, temperature } =
+      buildChangePlanPrompt(userMessage, analysis, affectedFiles, contextMd);
+
+    const result = await promptTracker.track({
+      projectId,
+      userId,
+      taskType: 'change-planning',
+      correlationId,
+      prompt,
+      systemMessage,
+      callFn: () =>
+        llmRouter.route('change-planning', {
+          systemMessage,
+          prompt,
+          maxTokens,
+          temperature,
+          responseFormat: 'json',
+        }),
+    });
+
+    const plan = this._parseJsonResponse(result.content);
+
+    logger.info('Change plan complete', {
+      projectId,
+      correlationId,
+      promptLogId: result.promptLogId,
+      planSteps: plan.plan?.length,
+      groupCount: plan.generationGroups?.length,
+    });
+
+    return plan;
+  }
+
+  /**
+   * Fix validation errors in generated code (Stage 6 of multi-step pipeline).
+   * Uses the code model for precise error correction.
+   *
+   * @param {Array<{file: string, line?: number, message: string, type: string}>} errors
+   * @param {Array<{path: string, content: string}>} affectedFiles - Files that have errors
+   * @param {Array<{path: string, content: string}>} allProjectFiles - All project files for reference
+   * @param {Object} options
+   * @returns {Promise<{files: Array, summary: string, remainingIssues: Array}>}
+   */
+  async fixCodeErrors(errors, affectedFiles, allProjectFiles, options) {
+    const { projectId, userId, correlationId } = options;
+
+    logger.info('Fixing code errors', {
+      projectId,
+      correlationId,
+      errorCount: errors.length,
+      affectedFileCount: affectedFiles.length,
+    });
+
+    // Context files = all project files minus the affected ones
+    const affectedPaths = new Set(affectedFiles.map((f) => f.path));
+    const contextFiles = allProjectFiles.filter((f) => !affectedPaths.has(f.path));
+    const contextMd = ''; // Not needed for targeted fixes
+
+    const { systemMessage, prompt, maxTokens, temperature } =
+      buildCodeFixPrompt(errors, affectedFiles, contextFiles, contextMd);
+
+    const result = await promptTracker.track({
+      projectId,
+      userId,
+      taskType: 'code-fix',
+      correlationId,
+      prompt,
+      systemMessage,
+      callFn: () =>
+        llmRouter.route('code-fix', {
+          systemMessage,
+          prompt,
+          maxTokens,
+          temperature,
+          responseFormat: 'json',
+        }),
+    });
+
+    const parsed = this._parseJsonResponse(result.content);
+
+    const files = (parsed.files || []).map((f) => ({
+      path: f.path,
+      content: f.content,
+      language: f.language || this._inferLanguage(f.path),
+      action: f.action || 'modify',
+    }));
+
+    logger.info('Code fix complete', {
+      projectId,
+      correlationId,
+      promptLogId: result.promptLogId,
+      filesFixed: files.length,
+      remainingIssues: parsed.remainingIssues?.length || 0,
+    });
+
+    return {
+      files,
+      summary: parsed.summary || '',
+      remainingIssues: parsed.remainingIssues || [],
+    };
   }
 
   /**

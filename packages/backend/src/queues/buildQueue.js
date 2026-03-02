@@ -8,7 +8,7 @@ const buildQueue = new Queue('imagia:build', config.redisUrl, {
     backoff: { type: 'exponential', delay: 2000 },
     removeOnComplete: 50,
     removeOnFail: 100,
-    timeout: 5 * 60 * 1000, // 5 minutes
+    timeout: 10 * 60 * 1000, // 10 minutes (multi-step pipeline + auto-fix)
   },
 });
 

@@ -1,6 +1,7 @@
 const { db } = require('../config/database');
 const logger = require('../config/logger');
 const codeGeneratorService = require('./codeGeneratorService');
+const codeValidatorService = require('./codeValidatorService');
 const contextService = require('./contextService');
 const { buildEnrichedMessage } = require('./urlExtractor');
 const progressEmitter = require('../queues/progressEmitter');
@@ -317,7 +318,7 @@ class AppBuilderService {
   async iterateFromMessage(options) {
     const { projectId, conversationId, messageId, userId, correlationId, model } = options;
 
-    logger.info('Starting iteration from message', {
+    logger.info('Starting iteration from message (multi-step pipeline)', {
       projectId,
       conversationId,
       messageId,
@@ -329,12 +330,12 @@ class AppBuilderService {
 
     try {
       // ---------------------------------------------------------------
-      // Stage 1: Load Context (0-10%)
+      // Stage 1: Analyze Request (0-8%)
       // ---------------------------------------------------------------
       await progressEmitter.emit(projectId, {
         progress: 2,
-        stage: 'loading',
-        message: 'Loading project context...',
+        stage: 'analyzing',
+        message: 'Analyzing your request...',
       });
 
       const userMessage = await this._getUserMessage(messageId);
@@ -351,48 +352,160 @@ class AppBuilderService {
           updated_at: db.fn.now(),
         });
 
-      await progressEmitter.emit(projectId, {
-        progress: 10,
-        stage: 'loading',
-        message: 'Context loaded',
-      });
+      const fileManifest = currentFiles.map((f) => f.path);
 
-      // ---------------------------------------------------------------
-      // Stage 2: Generate Changes (10-60%)
-      // ---------------------------------------------------------------
-      await progressEmitter.emit(projectId, {
-        progress: 12,
-        stage: 'iterating',
-        message: 'Generating code changes...',
-      });
-
-      const { files: changedFiles, summary, envVarsNeeded } =
-        await codeGeneratorService.iterateCode(
+      let analysis;
+      try {
+        analysis = await codeGeneratorService.analyzeChange(
           userMessage,
-          currentFiles,
-          requirements,
+          fileManifest,
           contextMd,
           trackerOptions
         );
+      } catch (analysisError) {
+        logger.warn('Change analysis failed, falling back to monolithic iteration', {
+          projectId,
+          error: analysisError.message,
+        });
+        analysis = null;
+      }
 
       await progressEmitter.emit(projectId, {
-        progress: 60,
-        stage: 'iterating',
-        message: `Generated ${changedFiles.length} file changes`,
+        progress: 8,
+        stage: 'analyzing',
+        message: 'Request analyzed',
       });
 
       // ---------------------------------------------------------------
-      // Stage 3: Apply Changes (60-80%)
+      // Fallback: If analysis failed or returned no affected files,
+      // use the old monolithic iterateCode approach
       // ---------------------------------------------------------------
-      const totalChanges = changedFiles.length;
-      let appliedCount = 0;
+      const hasAffectedFiles = analysis &&
+        ((analysis.affectedFiles && analysis.affectedFiles.length > 0) ||
+         (analysis.newFilesNeeded && analysis.newFilesNeeded.length > 0));
 
-      for (let i = 0; i < changedFiles.length; i++) {
-        const file = changedFiles[i];
-        const progressPct = 60 + Math.round(((i + 1) / totalChanges) * 20);
+      if (!hasAffectedFiles) {
+        logger.info('No affected files identified, falling back to monolithic iteration', {
+          projectId,
+          correlationId,
+          complexity: analysis?.complexity,
+        });
+        return this._monolithicIterate(
+          projectId, conversationId, userMessage, currentFiles,
+          requirements, contextMd, trackerOptions
+        );
+      }
+
+      // ---------------------------------------------------------------
+      // Stage 2: Plan Changes (8-15%)
+      // ---------------------------------------------------------------
+      await progressEmitter.emit(projectId, {
+        progress: 9,
+        stage: 'planning',
+        message: 'Planning changes...',
+      });
+
+      // Gather the content of affected files
+      const fileMap = new Map(currentFiles.map((f) => [f.path, f]));
+      const affectedFileContents = (analysis.affectedFiles || [])
+        .filter((path) => fileMap.has(path))
+        .map((path) => fileMap.get(path));
+
+      let changePlan;
+      try {
+        changePlan = await codeGeneratorService.planChanges(
+          userMessage,
+          analysis,
+          affectedFileContents,
+          contextMd,
+          trackerOptions
+        );
+      } catch (planError) {
+        logger.warn('Change planning failed, falling back to monolithic iteration', {
+          projectId,
+          error: planError.message,
+        });
+        return this._monolithicIterate(
+          projectId, conversationId, userMessage, currentFiles,
+          requirements, contextMd, trackerOptions
+        );
+      }
+
+      await progressEmitter.emit(projectId, {
+        progress: 15,
+        stage: 'planning',
+        message: `Planned ${changePlan.plan?.length || 0} file changes`,
+      });
+
+      // ---------------------------------------------------------------
+      // Stage 3: Generate Changes Per Group (15-55%)
+      // ---------------------------------------------------------------
+      const groups = changePlan.generationGroups || [];
+      // Fallback: if no groups were returned, generate all planned files as one group
+      const effectiveGroups = groups.length > 0
+        ? groups
+        : [{ group: 1, files: (changePlan.plan || []).map((p) => p.path), description: 'all changes' }];
+
+      let allChangedFiles = [];
+      let envVarsNeeded = [];
+
+      for (let gi = 0; gi < effectiveGroups.length; gi++) {
+        const group = effectiveGroups[gi];
+        const groupProgress = 15 + Math.round(((gi + 1) / effectiveGroups.length) * 40);
 
         await progressEmitter.emit(projectId, {
-          progress: Math.min(progressPct, 80),
+          progress: Math.min(groupProgress, 55),
+          stage: 'generating',
+          message: `Generating changes: ${group.description || `group ${gi + 1}`}...`,
+        });
+
+        // For each group, build a focused iteration prompt with ONLY relevant files
+        const groupPaths = new Set(group.files || []);
+        const relevantFiles = currentFiles.filter((f) => groupPaths.has(f.path));
+
+        // Also include files referenced by the plan but not in this group (as read-only context)
+        const allPlanPaths = new Set((changePlan.plan || []).map((p) => p.path));
+        const contextFilePaths = currentFiles
+          .filter((f) => !groupPaths.has(f.path) && allPlanPaths.has(f.path))
+          .slice(0, 5); // Limit context files
+
+        const groupFiles = [...relevantFiles, ...contextFilePaths];
+
+        const { files: groupChanges, summary: groupSummary, envVarsNeeded: groupEnvVars } =
+          await codeGeneratorService.iterateCode(
+            userMessage,
+            groupFiles,
+            requirements,
+            contextMd,
+            trackerOptions
+          );
+
+        allChangedFiles.push(...groupChanges);
+        if (groupEnvVars && groupEnvVars.length > 0) {
+          envVarsNeeded.push(...groupEnvVars);
+        }
+      }
+
+      // Deduplicate env vars
+      envVarsNeeded = [...new Set(envVarsNeeded)];
+
+      await progressEmitter.emit(projectId, {
+        progress: 55,
+        stage: 'generating',
+        message: `Generated ${allChangedFiles.length} file changes`,
+      });
+
+      // ---------------------------------------------------------------
+      // Stage 4: Apply Changes (55-65%)
+      // ---------------------------------------------------------------
+      let appliedCount = 0;
+
+      for (let i = 0; i < allChangedFiles.length; i++) {
+        const file = allChangedFiles[i];
+        const progressPct = 55 + Math.round(((i + 1) / allChangedFiles.length) * 10);
+
+        await progressEmitter.emit(projectId, {
+          progress: Math.min(progressPct, 65),
           stage: 'applying',
           message: `Applying changes to ${file.path}...`,
         });
@@ -401,44 +514,88 @@ class AppBuilderService {
           await db('project_files')
             .where({ project_id: projectId, file_path: file.path })
             .delete();
-
           logger.info('File deleted', { projectId, filePath: file.path });
         } else {
-          // action is 'create' or 'modify' -- upsert
           await this._saveFile(projectId, file);
         }
-
         appliedCount++;
       }
 
-      // Handle new env vars if needed -- update the .env.example
-      if (envVarsNeeded && envVarsNeeded.length > 0) {
+      if (envVarsNeeded.length > 0) {
         await this._appendEnvVars(projectId, envVarsNeeded, trackerOptions);
       }
 
       await progressEmitter.emit(projectId, {
-        progress: 80,
+        progress: 65,
         stage: 'applying',
         message: `Applied ${appliedCount} file changes`,
       });
 
       // ---------------------------------------------------------------
-      // Stage 4: Create Version (80-90%)
+      // Stage 5: Validate (65-75%)
       // ---------------------------------------------------------------
       await progressEmitter.emit(projectId, {
-        progress: 82,
-        stage: 'versioning',
+        progress: 66,
+        stage: 'validating',
+        message: 'Validating generated code...',
+      });
+
+      let allFilesAfterApply = await this._getProjectFiles(projectId);
+      let validation = codeValidatorService.validateChanges(allChangedFiles, allFilesAfterApply);
+
+      logger.info('Validation result', {
+        projectId,
+        valid: validation.valid,
+        errorCount: validation.errors.length,
+        warningCount: validation.warnings.length,
+      });
+
+      await progressEmitter.emit(projectId, {
+        progress: 75,
+        stage: 'validating',
+        message: validation.valid
+          ? 'Code validation passed'
+          : `Found ${validation.errors.length} issue(s), auto-fixing...`,
+      });
+
+      // ---------------------------------------------------------------
+      // Stage 6: Auto-Fix Loop (75-90%)
+      // ---------------------------------------------------------------
+      let fixSummary = '';
+      if (!validation.valid) {
+        const fixResult = await this._autoFixLoop(
+          projectId, validation, allFilesAfterApply, trackerOptions
+        );
+        fixSummary = fixResult.summary;
+        appliedCount += fixResult.fixedCount;
+
+        // Re-fetch files after fixes
+        allFilesAfterApply = await this._getProjectFiles(projectId);
+      }
+
+      await progressEmitter.emit(projectId, {
+        progress: 90,
+        stage: 'validating',
+        message: 'Validation complete',
+      });
+
+      // ---------------------------------------------------------------
+      // Stage 7: Finalize (90-100%)
+      // ---------------------------------------------------------------
+      await progressEmitter.emit(projectId, {
+        progress: 91,
+        stage: 'finalizing',
         message: 'Creating version snapshot...',
       });
 
-      const allFiles = await this._getProjectFiles(projectId);
       const versionNumber = await this._getNextVersionNumber(projectId);
-
-      const snapshot = allFiles.map((f) => ({
+      const snapshot = allFilesAfterApply.map((f) => ({
         path: f.path,
         checksum: generateContentHash(f.content),
         language: f.language,
       }));
+
+      const summary = changePlan.summary || analysis.summary || '';
 
       await db('project_versions').insert({
         project_id: projectId,
@@ -448,21 +605,7 @@ class AppBuilderService {
         diff_summary: summary,
       });
 
-      await progressEmitter.emit(projectId, {
-        progress: 90,
-        stage: 'versioning',
-        message: `Version ${versionNumber} created`,
-      });
-
-      // ---------------------------------------------------------------
-      // Stage 5: Update Context (90-95%)
-      // ---------------------------------------------------------------
-      await progressEmitter.emit(projectId, {
-        progress: 91,
-        stage: 'context',
-        message: 'Updating project context...',
-      });
-
+      // Update context (non-critical)
       try {
         await contextService.buildContextFromHistory(projectId);
       } catch (contextError) {
@@ -472,15 +615,6 @@ class AppBuilderService {
         });
       }
 
-      await progressEmitter.emit(projectId, {
-        progress: 95,
-        stage: 'context',
-        message: 'Project context updated',
-      });
-
-      // ---------------------------------------------------------------
-      // Stage 6: Finalize (95-100%)
-      // ---------------------------------------------------------------
       await db('projects')
         .where('id', projectId)
         .update({
@@ -491,12 +625,10 @@ class AppBuilderService {
         });
 
       // Update requirements in settings if env vars were added
-      if (envVarsNeeded && envVarsNeeded.length > 0) {
+      if (envVarsNeeded.length > 0) {
         const updatedSettings = await this._getProjectSettings(projectId);
         const existingEnvVars = updatedSettings.requirements?.envVarsNeeded || [];
-        const mergedEnvVars = [
-          ...new Set([...existingEnvVars, ...envVarsNeeded]),
-        ];
+        const mergedEnvVars = [...new Set([...existingEnvVars, ...envVarsNeeded])];
         if (updatedSettings.requirements) {
           updatedSettings.requirements.envVarsNeeded = mergedEnvVars;
           await db('projects')
@@ -508,13 +640,24 @@ class AppBuilderService {
         }
       }
 
-      const iterationMessage = `I've updated your app. Here's what changed:\n\n${summary}\n\n` +
+      let iterationMessage = `I've updated your app. Here's what changed:\n\n${summary}\n\n` +
         `${appliedCount} file(s) were modified.`;
+      if (fixSummary) {
+        iterationMessage += `\n\n*Auto-fix applied:* ${fixSummary}`;
+      }
+
       await this._storeAssistantMessage(conversationId, iterationMessage, {
         type: 'iteration-complete',
         filesChanged: appliedCount,
         versionNumber,
         summary,
+        pipeline: 'multi-step',
+        stages: {
+          analysis: analysis.changeType,
+          planSteps: changePlan.plan?.length,
+          validationErrors: validation.errors.length,
+          autoFixed: !!fixSummary,
+        },
       });
 
       await progressEmitter.emit(projectId, {
@@ -523,11 +666,14 @@ class AppBuilderService {
         message: 'Build complete!',
       });
 
-      logger.info('Iteration completed successfully', {
+      logger.info('Multi-step iteration completed successfully', {
         projectId,
         correlationId,
         filesChanged: appliedCount,
         versionNumber,
+        pipeline: 'multi-step',
+        validationErrors: validation.errors.length,
+        autoFixed: !!fixSummary,
       });
 
       return {
@@ -580,6 +726,270 @@ class AppBuilderService {
       .first();
 
     return parseInt(result.count, 10) === 0;
+  }
+
+  // ===========================================================================
+  // Multi-step pipeline helpers
+  // ===========================================================================
+
+  /**
+   * Fallback: monolithic iteration using the original single-call approach.
+   * Used when analysis returns no affected files or when analysis/planning fails.
+   * @private
+   */
+  async _monolithicIterate(projectId, conversationId, userMessage, currentFiles, requirements, contextMd, trackerOptions) {
+    await progressEmitter.emit(projectId, {
+      progress: 12,
+      stage: 'iterating',
+      message: 'Generating code changes...',
+    });
+
+    const { files: changedFiles, summary, envVarsNeeded } =
+      await codeGeneratorService.iterateCode(
+        userMessage,
+        currentFiles,
+        requirements,
+        contextMd,
+        trackerOptions
+      );
+
+    await progressEmitter.emit(projectId, {
+      progress: 60,
+      stage: 'iterating',
+      message: `Generated ${changedFiles.length} file changes`,
+    });
+
+    // Apply changes
+    let appliedCount = 0;
+    for (let i = 0; i < changedFiles.length; i++) {
+      const file = changedFiles[i];
+      const progressPct = 60 + Math.round(((i + 1) / changedFiles.length) * 20);
+
+      await progressEmitter.emit(projectId, {
+        progress: Math.min(progressPct, 80),
+        stage: 'applying',
+        message: `Applying changes to ${file.path}...`,
+      });
+
+      if (file.action === 'delete') {
+        await db('project_files')
+          .where({ project_id: projectId, file_path: file.path })
+          .delete();
+      } else {
+        await this._saveFile(projectId, file);
+      }
+      appliedCount++;
+    }
+
+    if (envVarsNeeded && envVarsNeeded.length > 0) {
+      await this._appendEnvVars(projectId, envVarsNeeded, trackerOptions);
+    }
+
+    // Validate + auto-fix even in monolithic mode
+    await progressEmitter.emit(projectId, {
+      progress: 80,
+      stage: 'validating',
+      message: 'Validating generated code...',
+    });
+
+    let allFiles = await this._getProjectFiles(projectId);
+    const validation = codeValidatorService.validateChanges(changedFiles, allFiles);
+
+    let fixSummary = '';
+    if (!validation.valid) {
+      await progressEmitter.emit(projectId, {
+        progress: 82,
+        stage: 'fixing',
+        message: `Found ${validation.errors.length} issue(s), auto-fixing...`,
+      });
+
+      const fixResult = await this._autoFixLoop(projectId, validation, allFiles, trackerOptions);
+      fixSummary = fixResult.summary;
+      appliedCount += fixResult.fixedCount;
+      allFiles = await this._getProjectFiles(projectId);
+    }
+
+    // Version snapshot
+    const versionNumber = await this._getNextVersionNumber(projectId);
+    const snapshot = allFiles.map((f) => ({
+      path: f.path,
+      checksum: generateContentHash(f.content),
+      language: f.language,
+    }));
+
+    await db('project_versions').insert({
+      project_id: projectId,
+      version_number: versionNumber,
+      snapshot: JSON.stringify(snapshot),
+      prompt_summary: userMessage,
+      diff_summary: summary,
+    });
+
+    // Context update (non-critical)
+    try {
+      await contextService.buildContextFromHistory(projectId);
+    } catch (contextError) {
+      logger.warn('Failed to update context after iteration', {
+        projectId,
+        error: contextError.message,
+      });
+    }
+
+    // Finalize
+    await db('projects')
+      .where('id', projectId)
+      .update({
+        status: 'draft',
+        build_progress: 100,
+        current_build_stage: 'complete',
+        updated_at: db.fn.now(),
+      });
+
+    if (envVarsNeeded && envVarsNeeded.length > 0) {
+      const updatedSettings = await this._getProjectSettings(projectId);
+      const existingEnvVars = updatedSettings.requirements?.envVarsNeeded || [];
+      const mergedEnvVars = [...new Set([...existingEnvVars, ...envVarsNeeded])];
+      if (updatedSettings.requirements) {
+        updatedSettings.requirements.envVarsNeeded = mergedEnvVars;
+        await db('projects')
+          .where('id', projectId)
+          .update({
+            settings: JSON.stringify(updatedSettings),
+            updated_at: db.fn.now(),
+          });
+      }
+    }
+
+    let iterationMessage = `I've updated your app. Here's what changed:\n\n${summary}\n\n` +
+      `${appliedCount} file(s) were modified.`;
+    if (fixSummary) {
+      iterationMessage += `\n\n*Auto-fix applied:* ${fixSummary}`;
+    }
+
+    await this._storeAssistantMessage(conversationId, iterationMessage, {
+      type: 'iteration-complete',
+      filesChanged: appliedCount,
+      versionNumber,
+      summary,
+      pipeline: 'monolithic',
+    });
+
+    await progressEmitter.emit(projectId, {
+      progress: 100,
+      stage: 'complete',
+      message: 'Build complete!',
+    });
+
+    logger.info('Monolithic iteration completed successfully', {
+      projectId,
+      filesChanged: appliedCount,
+      versionNumber,
+    });
+
+    return { success: true, filesChanged: appliedCount, summary };
+  }
+
+  /**
+   * Auto-fix loop: repeatedly validate and fix errors up to maxIterations.
+   * @private
+   * @param {string} projectId
+   * @param {{errors: Array}} validation - Initial validation result
+   * @param {Array} allFiles - All project files after initial apply
+   * @param {Object} trackerOptions
+   * @param {number} [maxIterations=3]
+   * @returns {Promise<{fixedCount: number, summary: string}>}
+   */
+  async _autoFixLoop(projectId, validation, allFiles, trackerOptions, maxIterations = 3) {
+    let currentErrors = validation.errors;
+    let totalFixedCount = 0;
+    let combinedSummary = '';
+
+    for (let iteration = 0; iteration < maxIterations; iteration++) {
+      if (currentErrors.length === 0) break;
+
+      const iterProgress = 75 + Math.round(((iteration + 1) / maxIterations) * 15);
+
+      await progressEmitter.emit(projectId, {
+        progress: Math.min(iterProgress, 90),
+        stage: 'fixing',
+        message: `Auto-fix attempt ${iteration + 1}/${maxIterations} (${currentErrors.length} error${currentErrors.length > 1 ? 's' : ''})...`,
+      });
+
+      logger.info('Auto-fix iteration', {
+        projectId,
+        iteration: iteration + 1,
+        errorCount: currentErrors.length,
+        errors: currentErrors.map((e) => `${e.file}: ${e.message}`).slice(0, 5),
+      });
+
+      // Gather files that have errors
+      const errorFilePaths = new Set(currentErrors.map((e) => e.file));
+      const affectedFiles = allFiles.filter((f) => errorFilePaths.has(f.path));
+
+      try {
+        const fixResult = await codeGeneratorService.fixCodeErrors(
+          currentErrors,
+          affectedFiles,
+          allFiles,
+          trackerOptions
+        );
+
+        // Apply fixes
+        for (const file of fixResult.files) {
+          await this._saveFile(projectId, file);
+          totalFixedCount++;
+        }
+
+        if (fixResult.summary) {
+          combinedSummary += (combinedSummary ? '; ' : '') + fixResult.summary;
+        }
+
+        // Re-validate
+        allFiles = await this._getProjectFiles(projectId);
+        const revalidation = codeValidatorService.validateChanges(fixResult.files, allFiles);
+
+        if (revalidation.valid) {
+          logger.info('Auto-fix resolved all errors', {
+            projectId,
+            iteration: iteration + 1,
+            totalFixed: totalFixedCount,
+          });
+          currentErrors = [];
+          break;
+        }
+
+        currentErrors = revalidation.errors;
+
+        // If remaining issues reported by the LLM and they match remaining errors, stop
+        if (fixResult.remainingIssues && fixResult.remainingIssues.length > 0) {
+          logger.info('LLM reported remaining issues, continuing fix loop', {
+            projectId,
+            remainingIssues: fixResult.remainingIssues.length,
+          });
+        }
+      } catch (fixError) {
+        logger.warn('Auto-fix iteration failed', {
+          projectId,
+          iteration: iteration + 1,
+          error: fixError.message,
+        });
+        // Stop the fix loop on error — the code will proceed with remaining validation errors
+        break;
+      }
+    }
+
+    if (currentErrors.length > 0) {
+      logger.warn('Auto-fix did not resolve all errors', {
+        projectId,
+        remainingErrors: currentErrors.length,
+        errors: currentErrors.map((e) => `${e.file}: ${e.message}`),
+      });
+    }
+
+    return {
+      fixedCount: totalFixedCount,
+      summary: combinedSummary,
+    };
   }
 
   // ===========================================================================
