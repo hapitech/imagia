@@ -550,6 +550,7 @@ class CodeGeneratorService {
 
     let totalUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
     let turnCount = 0;
+    let agentResponse = ''; // Capture the agent's final text response
     const startTime = Date.now();
 
     // Agent loop
@@ -577,6 +578,11 @@ class CodeGeneratorService {
       totalUsage.totalTokens += response.usage?.totalTokens || 0;
 
       const { message: assistantMsg, finishReason } = response;
+
+      // Always capture the latest text from the agent
+      if (assistantMsg.content) {
+        agentResponse = assistantMsg.content;
+      }
 
       // If no tool calls, the agent is done
       if (!assistantMsg.toolCalls || assistantMsg.toolCalls.length === 0 || finishReason === 'stop') {
@@ -649,6 +655,7 @@ class CodeGeneratorService {
 
     return {
       ...results,
+      agentResponse,
       tokenUsage: totalUsage,
       turnCount,
     };
@@ -661,27 +668,33 @@ class CodeGeneratorService {
   _buildToolSystemPrompt(fileManifest, contextMd) {
     const manifestList = fileManifest.map((p) => `  ${p}`).join('\n');
 
-    let prompt = `You are an expert full-stack developer. The user asks you to modify a web application. You MUST use the provided tools to make changes — never just describe changes in text.
+    let prompt = `You are an expert full-stack developer working on a web application. You help users by either modifying code or answering questions about the codebase.
 
-## Workflow
+## How to Respond
+
+**If the user asks you to change, add, fix, or build something:**
 1. Use read_files to read the files you need to understand
 2. Use apply_changes to write your modifications (with COMPLETE file contents)
 3. If apply_changes reports validation errors, fix them with another apply_changes call
-4. After all changes are applied, respond with a brief text summary
+4. After all changes are applied, respond with a brief text summary of what you did
+
+**If the user asks a question, requests a summary, or wants research/analysis:**
+1. Use read_files to read any relevant files
+2. Respond with a detailed, helpful text answer — do NOT call apply_changes
 
 ## Project Files
 ${manifestList}
 
 ## Rules
-1. ALWAYS read files with read_files before modifying them. Never guess at file contents.
-2. You MUST call apply_changes to implement the user's request. Do NOT skip this step or only describe changes in text.
+1. ALWAYS read files with read_files before modifying or answering questions about them. Never guess at file contents.
+2. When making code changes, you MUST call apply_changes — do not just describe changes in text.
 3. Return COMPLETE file contents in apply_changes, not diffs or partial snippets.
 4. If apply_changes reports validation errors, fix them immediately in a follow-up apply_changes call.
 5. You may create new files with action "create" — ensure imports reference them correctly.
 6. You may delete files with action "delete" — update imports in other files accordingly.
 7. Keep changes focused and minimal — only modify what the user requested.
 8. Use modern JavaScript/React patterns (ES modules, functional components, hooks).
-9. Your final message (after applying all changes) should be a text summary with NO tool calls.`;
+9. Your final message should be a helpful text response with NO tool calls.`;
 
     if (contextMd) {
       prompt += `\n\n## Project Context\n${contextMd}`;

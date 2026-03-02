@@ -11,7 +11,9 @@
     "worker:deploy": "node src/queues/workers/deployWorker.js",
     "worker:social": "node src/queues/workers/socialWorker.js",
     "worker:all": "node src/queues/workers/allWorkers.js",
-    "lint": "eslint src/"
+    "lint": "eslint src/",
+    "test": "jest --verbose",
+    "test:tools": "jest --verbose tests/toolDefinitions.test.js tests/toolExecutor.test.js tests/iterateWithTools.test.js tests/appBuilderResponse.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
@@ -46,6 +48,7 @@
     "winston": "^3.17.0"
   },
   "devDependencies": {
+    "jest": "^30.2.0",
     "nodemon": "^3.1.9"
   },
   "engines": {

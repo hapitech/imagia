@@ -366,7 +366,7 @@ class AppBuilderService {
       // ---------------------------------------------------------------
       // Stage 2: Tool-Calling Agent (5-85%)
       // ---------------------------------------------------------------
-      let changedFiles, summary, envVarsNeeded, pipeline;
+      let changedFiles, summary, envVarsNeeded, pipeline, agentResponse;
 
       if (this._supportsToolCalling(model)) {
         try {
@@ -396,6 +396,8 @@ class AppBuilderService {
           summary = agentResult.summary;
           envVarsNeeded = agentResult.envVarsNeeded;
           pipeline = 'tool-calling';
+          // Capture the agent's text response for question/research/summary prompts
+          agentResponse = agentResult.agentResponse || '';
 
           logger.info('Tool-calling agent succeeded', {
             projectId,
@@ -429,8 +431,10 @@ class AppBuilderService {
         );
       }
 
-      // If no files were changed, still finalize successfully
+      // If no files were changed, use the agent's text response
       if (!changedFiles || changedFiles.length === 0) {
+        const responseText = agentResponse || summary || 'I reviewed your project. Let me know if you need anything else.';
+
         await db('projects')
           .where('id', projectId)
           .update({
@@ -440,8 +444,7 @@ class AppBuilderService {
             updated_at: db.fn.now(),
           });
 
-        await this._storeAssistantMessage(conversationId,
-          summary || 'I reviewed your project but no file changes were needed.', {
+        await this._storeAssistantMessage(conversationId, responseText, {
             type: 'iteration-complete',
             filesChanged: 0,
             pipeline,
@@ -450,10 +453,10 @@ class AppBuilderService {
         await progressEmitter.emit(projectId, {
           progress: 100,
           stage: 'complete',
-          message: 'Complete — no changes needed',
+          message: 'Complete',
         });
 
-        return { success: true, filesChanged: 0, summary: summary || 'No changes needed' };
+        return { success: true, filesChanged: 0, summary: responseText };
       }
 
       await progressEmitter.emit(projectId, {
