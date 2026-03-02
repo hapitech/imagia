@@ -53,17 +53,17 @@ const ROUTING_TABLE = {
   },
   'demo-script': {
     primary: 'fireworks',
-    model: 'accounts/fireworks/models/deepseek-v3',
+    model: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
     fallback: 'openai',
   },
   'change-analysis': {
     primary: 'fireworks',
-    model: 'accounts/fireworks/models/deepseek-v3',
+    model: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
     fallback: 'openai',
   },
   'change-planning': {
     primary: 'fireworks',
-    model: 'accounts/fireworks/models/deepseek-v3',
+    model: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
     fallback: 'openai',
   },
   'code-fix': {
@@ -81,7 +81,7 @@ const MODEL_TO_PROVIDER = {
   'accounts/fireworks/models/kimi-k2-instruct-0905': 'fireworks',
   'accounts/fireworks/models/kimi-k2-thinking': 'fireworks',
   'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct': 'fireworks',
-  'accounts/fireworks/models/deepseek-v3': 'fireworks',
+  'accounts/fireworks/models/qwen3-8b': 'fireworks',
   'accounts/fireworks/models/llama-v3p3-70b-instruct': 'fireworks',
   'accounts/fireworks/models/mixtral-8x7b-instruct': 'fireworks',
   'accounts/fireworks/models/qwen2p5-coder-32b-instruct': 'fireworks',

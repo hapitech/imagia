@@ -16,7 +16,7 @@ const PRICING = {
   'accounts/fireworks/models/kimi-k2-instruct-0905': { input: 0.60, output: 2.50 },
   'accounts/fireworks/models/kimi-k2-thinking': { input: 0.60, output: 2.50 },
   'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct': { input: 0.45, output: 1.80 },
-  'accounts/fireworks/models/deepseek-v3': { input: 0.56, output: 1.68 },
+  'accounts/fireworks/models/qwen3-8b': { input: 0.20, output: 0.20 },
   'accounts/fireworks/models/llama-v3p3-70b-instruct': { input: 0.90, output: 0.90 },
   'accounts/fireworks/models/mixtral-8x7b-instruct': { input: 0.50, output: 0.50 },
   'accounts/fireworks/models/qwen2p5-coder-32b-instruct': { input: 0.90, output: 0.90 },
