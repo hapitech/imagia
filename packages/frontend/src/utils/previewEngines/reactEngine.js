@@ -85,9 +85,8 @@ export function buildReactPreview(rawFileList, filePrefix = null) {
     return c;
   };
 
-  // ---- Collect npm imports ----
-  const npmImportEntries = [];
-  const seenImports = new Set();
+  // ---- Collect npm imports (merged per package) ----
+  const pkgImportMap = new Map(); // pkg -> { defaultName, namedImports: Set, namespaceImport }
   for (const f of fileList) {
     const content = f.content || '';
     const importRegex = /^import\s+(.*?)\s+from\s+['"]([^.'"][^'"]*?)['"];?\s*$/gm;
@@ -97,34 +96,36 @@ export function buildReactPreview(rawFileList, filePrefix = null) {
       const pkg = m[2];
       if (pkg.startsWith('.') || /\.(css|scss|sass|less)$/.test(pkg)) continue;
       if (pkg === 'react' || pkg === 'react-dom' || pkg === 'react-dom/client') continue;
-      const key = `${clause}::${pkg}`;
-      if (seenImports.has(key)) continue;
-      seenImports.add(key);
 
-      const entry = { pkg, defaultName: null, namedImports: [], namespaceImport: null };
+      if (!pkgImportMap.has(pkg)) {
+        pkgImportMap.set(pkg, { defaultName: null, namedImports: new Set(), namespaceImport: null });
+      }
+      const entry = pkgImportMap.get(pkg);
+
       const nsMatch = clause.match(/^\*\s+as\s+(\w+)$/);
-      if (nsMatch) { entry.namespaceImport = nsMatch[1]; npmImportEntries.push(entry); continue; }
+      if (nsMatch) { entry.namespaceImport = entry.namespaceImport || nsMatch[1]; continue; }
+
       const parts = clause.replace(/\s+/g, ' ');
       const braceMatch = parts.match(/\{([^}]*)\}/);
       if (braceMatch) {
-        entry.namedImports = braceMatch[1].split(',').map(s => s.trim()).filter(Boolean);
+        braceMatch[1].split(',').map(s => s.trim()).filter(Boolean).forEach(n => entry.namedImports.add(n));
       }
       const beforeBrace = parts.replace(/\{[^}]*\}/, '').replace(/,/g, '').trim();
-      if (beforeBrace) entry.defaultName = beforeBrace;
-      npmImportEntries.push(entry);
+      if (beforeBrace) entry.defaultName = entry.defaultName || beforeBrace;
     }
   }
 
-  const dynamicImportLines = npmImportEntries.map(({ pkg, defaultName, namedImports, namespaceImport }) => {
+  const dynamicImportLines = [...pkgImportMap.entries()].map(([pkg, { defaultName, namedImports, namespaceImport }]) => {
     const escapedPkg = pkg.replace(/'/g, "\\'");
+    const named = [...namedImports];
     if (namespaceImport) {
       return `const ${namespaceImport} = await import('${escapedPkg}').catch(() => ({}));`;
     }
     const lines = [];
-    if (defaultName && namedImports.length > 0) {
+    if (defaultName && named.length > 0) {
       lines.push(`const _mod_${defaultName} = await import('${escapedPkg}').catch(() => ({}));`);
       lines.push(`const ${defaultName} = _mod_${defaultName}.default || _mod_${defaultName};`);
-      const destructure = namedImports.map(n => {
+      const destructure = named.map(n => {
         const asMatch = n.match(/^(\w+)\s+as\s+(\w+)$/);
         return asMatch ? `${asMatch[1]}: ${asMatch[2]}` : n;
       }).join(', ');
@@ -132,8 +133,8 @@ export function buildReactPreview(rawFileList, filePrefix = null) {
     } else if (defaultName) {
       lines.push(`const _mod_${defaultName} = await import('${escapedPkg}').catch(() => ({}));`);
       lines.push(`const ${defaultName} = _mod_${defaultName}.default || _mod_${defaultName};`);
-    } else if (namedImports.length > 0) {
-      const destructure = namedImports.map(n => {
+    } else if (named.length > 0) {
+      const destructure = named.map(n => {
         const asMatch = n.match(/^(\w+)\s+as\s+(\w+)$/);
         return asMatch ? `${asMatch[1]}: ${asMatch[2]}` : n;
       }).join(', ');
