@@ -148,10 +148,11 @@ class FireworksService {
 
     messages.push({ role: 'user', content: prompt });
 
+    // Fireworks requires stream=true for max_tokens > 4096; cap for non-streaming
     const payload = {
       model,
       messages,
-      max_tokens: maxTokens,
+      max_tokens: Math.min(maxTokens, 4096),
       temperature,
     };
 
@@ -250,10 +251,14 @@ class FireworksService {
    * @private
    */
   async _callApiWithTools({ messages, tools, toolChoice, model, maxTokens, temperature }) {
+    // Fireworks requires stream=true for max_tokens > 4096.
+    // For non-streaming, cap at 4096.
+    const effectiveMaxTokens = Math.min(maxTokens, 4096);
+
     const payload = {
       model,
       messages,
-      max_tokens: maxTokens,
+      max_tokens: effectiveMaxTokens,
       temperature,
       tools,
       tool_choice: toolChoice,
