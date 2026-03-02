@@ -405,6 +405,8 @@ class AppBuilderService {
             changedFiles: changedFiles.length,
             turnCount: agentResult.turnCount,
             totalTokens: agentResult.tokenUsage?.totalTokens,
+            agentResponseLength: agentResponse?.length || 0,
+            agentResponsePreview: agentResponse ? agentResponse.substring(0, 200) : '(empty)',
           });
         } catch (toolError) {
           logger.warn('Tool-calling agent failed, falling back to monolithic iteration', {
@@ -434,6 +436,14 @@ class AppBuilderService {
       // If no files were changed, use the agent's text response
       if (!changedFiles || changedFiles.length === 0) {
         const responseText = agentResponse || summary || 'I reviewed your project. Let me know if you need anything else.';
+
+        logger.info('Storing no-changes response', {
+          projectId,
+          responseTextLength: responseText.length,
+          responseTextPreview: responseText.substring(0, 200),
+          hasAgentResponse: !!agentResponse,
+          hasSummary: !!summary,
+        });
 
         await db('projects')
           .where('id', projectId)
